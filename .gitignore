@@ -218,3 +218,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Strava Stuff
+# Secrets
+.env
+*.token
+strava_tokens.json
+
+# Data
+data/raw/
+*.csv
+*.parquet
+
+# Models
+*.pkl
+*.joblib
+
+# OS / editor
+.DS_Store
+.vscode/
