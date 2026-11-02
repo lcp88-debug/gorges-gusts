@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+  {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
+  <p>See the segments from your last 90 days of road rides, sorted by how often you ride them and by how popular they are.</p>
+  <p><a class="button" href="/login">Connect with Strava</a></p>
+  <p class="muted">
+    Strava's permission page asks for access to all your activities, including private ones, because that's
+    needed for your personal segment stats. Private rides aren't added to your lists, though Strava's all-time
+    effort count may include them. Your data is only shown to you, and rides and segments are deleted from this app within 7 days.
+  </p>
+{% endblock %}

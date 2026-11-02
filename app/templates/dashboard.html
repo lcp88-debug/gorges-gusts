@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block head %}{% if active %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
+{% block actions %}
+  <div class="actions">
+    <form method="post" action="/refresh"><button{% if active %} disabled{% endif %}>Refresh</button></form>
+    <form method="post" action="/logout"><button class="quiet">Log out</button></form>
+  </div>
+{% endblock %}
+{% block content %}
+  {% if active %}
+    <div class="notice" role="status">
+      {% if job.status == "paused" %}
+        Waiting for Strava's request limit. This will carry on at {{ job.resume_at | localtime }}.{% if job.total %} ({{ job.done }} of {{ job.total }} done){% endif %}
+      {% elif job.phase == "segments" %}
+        Fetching segment details: {{ job.done }} of {{ job.total }}
+      {% elif job.phase == "rides" and job.total %}
+        Reading your rides: {{ job.done }} of {{ job.total }}
+      {% else %}
+        Checking Strava for your rides…
+      {% endif %}
+      {% if job.total %}<progress value="{{ job.done }}" max="{{ job.total }}"></progress>{% endif %}
+    </div>
+  {% elif job and job.status == "failed" %}
+    <p class="notice error" role="alert">{{ job.error }}</p>
+  {% endif %}
+
+  {% if show_lists %}
+    <nav class="tabs" aria-label="Sort order">
+      <a href="/?sort=attempted"{% if sort == "attempted" %} aria-current="page"{% endif %}>Most attempted</a>
+      <a href="/?sort=popular"{% if sort == "popular" %} aria-current="page"{% endif %}>Most popular</a>
+    </nav>
+    {% if segments %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Segment</th>
+              <th scope="col">Distance</th>
+              <th scope="col">Avg grade</th>
+              <th scope="col">Your efforts, 90 days</th>
+              <th scope="col">Your efforts, all time</th>
+              <th scope="col">Athletes</th>
+              <th scope="col">Total efforts</th>
+              <th scope="col"><span hidden>Link</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for segment in segments %}
+              <tr>
+                <td>{{ segment.name }}</td>
+                <td>{{ segment.distance_m | miles }}</td>
+                <td>{{ segment.average_grade | percent }}</td>
+                <td>{{ segment.recent_efforts | count }}</td>
+                <td>{{ segment.all_time_efforts | count }}</td>
+                <td>{{ segment.athlete_count | count }}</td>
+                <td>{{ segment.effort_count | count }}</td>
+                <td><a href="https://www.strava.com/segments/{{ segment.id }}" target="_blank" rel="noopener">View on Strava</a></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% elif not active %}
+      <p>No segments found in your road rides from the last 90 days.</p>
+    {% endif %}
+  {% endif %}
+{% endblock %}
