@@ -21,16 +21,13 @@ Shows the segments from your last 90 days of road rides, sorted by your efforts 
 
 ### Start and stop
 
-Postgres doesn't restart by itself after a reboot:
-
 ```sh
-conda run -n gorges-pg pg_ctl -D ~/.local/share/gorges-gusts/pgdata -l ~/.local/share/gorges-gusts/pgdata/server.log start
-.venv/bin/python -m uvicorn app.asgi:app --port 8000
+./start.sh
 ```
 
-Then open <http://localhost:8000>. Open it using `localhost`, not `127.0.0.1`, so the login cookie survives the trip to Strava.
+This starts Postgres if needed, starts the app, and opens <http://localhost:8000> in your browser. Press Ctrl+C to stop the app.
 
-To stop Postgres:
+Postgres keeps running in the background. To stop it too:
 
 ```sh
 conda run -n gorges-pg pg_ctl -D ~/.local/share/gorges-gusts/pgdata stop
