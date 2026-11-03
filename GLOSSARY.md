@@ -26,3 +26,19 @@ A list of a rider's own segments from their last 90 days of rides, ranked by how
 **Most Popular**:
 A list of a rider's own segments and those attempted by recently active contributors, ranked together by how many people have ridden each one on Strava.
 _Avoid_: Wider list, global list
+
+**Wind effect**:
+The percentage change in a rider's time on a segment at the same effort, compared with no wind. Negative means the wind makes them faster.
+_Avoid_: Wind rating, wind score, watts saved
+
+**Rider profile**:
+The weight and best 20-minute power a rider enters, used to work out their wind effect. It comes from the rider, not from Strava.
+_Avoid_: Settings, athlete data
+
+**Best hour**:
+The hour in the next 48 with a segment's lowest wind effect, including night hours.
+_Avoid_: Best window, best time
+
+**Less certain**:
+A mark on a wind effect from steep terrain or a steep descent, where the estimate is more likely to be well off.
+_Avoid_: Low confidence
