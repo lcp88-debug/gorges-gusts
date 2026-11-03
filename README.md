@@ -3,7 +3,7 @@ Gives daily notifications on best strava segments to put in a KOM attempt for, u
 
 ## Running locally
 
-Shows the segments from your last 90 days of road rides, sorted by your efforts and by popularity.
+Shows the segments from your last 90 days of road rides, sorted by your efforts and by popularity. Setting `POOLED_MOST_POPULAR=true` also adds other riders' segments to Most popular. Leave it off until webhooks are running.
 
 ### One-time setup
 

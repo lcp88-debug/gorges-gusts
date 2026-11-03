@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS athletes (
     scope             TEXT NOT NULL,
     last_synced_at    TIMESTAMPTZ
 );
+-- NULL until the athlete has connected with the contributing notice on screen.
+ALTER TABLE athletes ADD COLUMN IF NOT EXISTS contributes BOOLEAN;
 
 -- Strava data: every row carries fetched_at and is purged after CACHE_TTL.
 CREATE TABLE IF NOT EXISTS rides (
@@ -25,22 +27,33 @@ CREATE TABLE IF NOT EXISTS efforts (
     start_date TIMESTAMPTZ NOT NULL,
     fetched_at TIMESTAMPTZ NOT NULL
 );
+-- True only for rides visible to everyone. Older rows stay false until refetched.
+ALTER TABLE efforts ADD COLUMN IF NOT EXISTS shareable BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS efforts_athlete_segment_idx ON efforts (athlete_id, segment_id);
 CREATE INDEX IF NOT EXISTS efforts_ride_idx ON efforts (ride_id);
+CREATE INDEX IF NOT EXISTS efforts_segment_idx ON efforts (segment_id);
 
--- Per athlete, because the details response includes that athlete's own stats.
+-- Older versions stored segments per athlete. It's only a cache, so start it again.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'segments' AND column_name = 'athlete_id'
+    ) THEN
+        DROP TABLE segments;
+    END IF;
+END $$;
+
+-- Shared between athletes, and deliberately doesn't record who fetched each one.
 CREATE TABLE IF NOT EXISTS segments (
-    athlete_id       BIGINT NOT NULL REFERENCES athletes (id) ON DELETE CASCADE,
-    id               BIGINT NOT NULL,
-    name             TEXT NOT NULL,
-    distance_m       DOUBLE PRECISION,
-    average_grade    DOUBLE PRECISION,
-    polyline         TEXT,
-    athlete_count    BIGINT,
-    effort_count     BIGINT,
-    all_time_efforts BIGINT,
-    fetched_at       TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (athlete_id, id)
+    id            BIGINT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    distance_m    DOUBLE PRECISION,
+    average_grade DOUBLE PRECISION,
+    polyline      TEXT,
+    athlete_count BIGINT,
+    effort_count  BIGINT,
+    fetched_at    TIMESTAMPTZ NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sync_jobs (

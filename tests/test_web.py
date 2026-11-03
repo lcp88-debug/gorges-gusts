@@ -1,5 +1,6 @@
 import re
 import time
+from dataclasses import replace
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -22,6 +23,17 @@ def app(db, settings):
 @pytest.fixture
 def client(app):
     with TestClient(app, follow_redirects=False, base_url="http://localhost") as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def pooled_app(db, settings):
+    return create_app(replace(settings, pooled_most_popular=True), start_worker=False)
+
+
+@pytest.fixture
+def pooled_client(pooled_app):
+    with TestClient(pooled_app, follow_redirects=False, base_url="http://localhost") as test_client:
         yield test_client
 
 
@@ -185,7 +197,7 @@ def test_rows_show_the_agreed_details(app, client):
 
     for expected in ("2.0 mi", "5.2%", "3,456", "View on Strava", "https://www.strava.com/segments/500"):
         assert expected in page
-    assert "–" in page  # Popular Road has no all-time count.
+    assert "all time" not in page
 
 
 @responses.activate
@@ -263,3 +275,173 @@ def test_failed_first_load_shows_the_error_without_an_empty_list_or_retry(app, c
     assert "Most attempted" not in page
     with db.connect() as conn:
         assert conn.execute("SELECT count(*) AS n FROM sync_jobs").fetchone()["n"] == 1
+
+
+def test_connect_page_does_not_promise_data_is_only_shown_to_you_when_pooling_is_on(pooled_client):
+    page = pooled_client.get("/").text
+
+    assert "only shown to you" not in page
+    assert "other riders" in page
+    assert "turn this off" in page
+
+
+def test_connect_page_does_not_mention_contributing_when_pooling_is_off(client):
+    assert "other riders" not in client.get("/").text
+
+
+def seed_contributor_segment(db, contributes=True):
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO athletes (id, access_token_enc, refresh_token_enc, expires_at, scope, contributes)
+            VALUES (2002, 'x', 'x', 0, 'read', %s)
+            """,
+            (contributes,),
+        )
+        conn.execute("INSERT INTO rides VALUES (77, 2002, now(), now())")
+        conn.execute(
+            """
+            INSERT INTO efforts (id, athlete_id, ride_id, segment_id, start_date, shareable, fetched_at)
+            VALUES (771, 2002, 77, 700, now(), TRUE, now())
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO segments (id, name, athlete_count, effort_count, fetched_at)
+            VALUES (700, 'Their Climb', 50000, 90000, now())
+            """
+        )
+
+
+def contributes(db):
+    with db.connect() as conn:
+        return conn.execute(
+            "SELECT contributes FROM athletes WHERE id = %s", (ATHLETE_ID,)
+        ).fetchone()["contributes"]
+
+
+@responses.activate
+def test_connecting_with_the_notice_on_screen_makes_a_rider_a_contributor(pooled_client, db):
+    log_in(pooled_client)
+
+    assert contributes(db) is True
+
+
+@responses.activate
+def test_connecting_without_the_notice_does_not_make_a_rider_a_contributor(client, db):
+    log_in(client)
+
+    assert contributes(db) is None
+
+
+@responses.activate
+def test_logging_in_again_keeps_an_opt_out(pooled_client, db):
+    log_in(pooled_client)
+    pooled_client.post("/contributing/off")
+
+    log_in(pooled_client)
+
+    assert contributes(db) is False
+
+
+@responses.activate
+def test_rider_sees_contributors_segments_on_most_popular_only(pooled_app, pooled_client, db):
+    log_in(pooled_client)
+    mock_strava()
+    pooled_app.state.worker.run_next_job()
+    seed_contributor_segment(db)
+
+    assert "Their Climb" in pooled_client.get("/?sort=popular").text
+    assert "Their Climb" not in pooled_client.get("/?sort=attempted").text
+
+
+@responses.activate
+def test_off_switch_keeps_contributors_segments_off_most_popular(app, client, db):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+    seed_contributor_segment(db)
+
+    page = client.get("/?sort=popular").text
+
+    assert "Their Climb" not in page
+    assert "/contributing" not in page
+
+
+@responses.activate
+def test_opting_out_and_back_in_from_the_page(pooled_app, pooled_client, db):
+    log_in(pooled_client)
+    mock_strava()
+    pooled_app.state.worker.run_next_job()
+    assert 'action="/contributing/off"' in pooled_client.get("/").text
+
+    pooled_client.post("/contributing/off")
+
+    assert contributes(db) is False
+    assert 'action="/contributing/on"' in pooled_client.get("/").text
+
+    pooled_client.post("/contributing/on")
+
+    assert contributes(db) is True
+
+
+def test_changing_the_setting_when_logged_out_does_nothing(pooled_client):
+    response = pooled_client.post("/contributing/off")
+
+    assert response.status_code == 303
+
+
+@responses.activate
+def test_visit_fetches_details_that_expired_before_the_riders_own_rides(app, client, db):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+    with db.connect() as conn:
+        conn.execute("DELETE FROM segments WHERE id = 600")
+
+    client.get("/")
+    assert app.state.worker.run_next_job() is True
+
+    assert "Popular Road" in client.get("/").text
+
+
+@responses.activate
+def test_visit_with_nothing_missing_does_not_queue_a_sync(app, client):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+
+    client.get("/")
+
+    assert app.state.worker.run_next_job() is False
+
+
+@responses.activate
+def test_rides_expiring_soon_after_a_refresh_trigger_a_new_sync_not_an_empty_list(app, client, db):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+    client.post("/refresh")
+    app.state.worker.run_next_job()
+    with db.connect() as conn:
+        conn.execute("UPDATE rides SET fetched_at = now() - interval '7 days'")
+    app.state.worker.purge_if_due()
+
+    page = client.get("/").text
+
+    assert "No segments found" not in page
+    assert "Checking Strava" in page
+    assert app.state.worker.run_next_job() is True
+    assert "Popular Road" in client.get("/").text
+
+
+@responses.activate
+def test_cleanup_with_nothing_expired_does_not_trigger_a_sync(app, client):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+    app.state.worker.purge_if_due()
+
+    client.get("/")
+
+    assert app.state.worker.run_next_job() is False

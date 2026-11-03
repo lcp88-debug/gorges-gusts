@@ -4,8 +4,14 @@
   <p>See the segments from your last 90 days of road rides, sorted by how often you ride them and by how popular they are.</p>
   <p><a class="button" href="/login">Connect with Strava</a></p>
   <p class="muted">
-    Strava's permission page asks for access to all your activities, including private ones, because that's
-    needed for your personal segment stats. Private rides aren't added to your lists, though Strava's all-time
-    effort count may include them. Your data is only shown to you, and rides and segments are deleted from this app within 7 days.
+    Strava's permission page asks for access to all your activities, including private ones.
+    Private rides aren't added to your lists. Rides and segments are deleted from this app within 7 days.
+    {% if pooled %}
+      Most popular also includes segments other riders have attempted. In the same way, segments from your rides
+      that are visible to everyone appear on other riders' lists, without your name, though friends may be able to
+      guess who rode them. You can turn this off at any time after connecting, and still see their segments.
+    {% else %}
+      Your data is only shown to you.
+    {% endif %}
   </p>
 {% endblock %}

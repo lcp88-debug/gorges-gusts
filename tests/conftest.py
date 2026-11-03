@@ -42,7 +42,9 @@ class FakeStrava:
         self._record(f"segment:{segment_id}")
         return self.segments[segment_id]
 
-    def add_ride(self, ride_id, segment_ids, when="2026-10-20T10:00:00Z", **overrides):
+    def add_ride(
+        self, ride_id, segment_ids, when="2026-10-20T10:00:00Z", visibility="everyone", **overrides
+    ):
         activity = {
             "id": ride_id,
             "sport_type": "Ride",
@@ -59,6 +61,7 @@ class FakeStrava:
                 {
                     "id": ride_id * 1000 + index,
                     "start_date": when,
+                    "visibility": visibility,
                     "segment": {"id": segment_id, "private": False},
                 }
                 for index, segment_id in enumerate(segment_ids)

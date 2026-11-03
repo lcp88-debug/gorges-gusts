@@ -38,7 +38,6 @@
               <th scope="col">Distance</th>
               <th scope="col">Avg grade</th>
               <th scope="col">Your efforts, 90 days</th>
-              <th scope="col">Your efforts, all time</th>
               <th scope="col">Athletes</th>
               <th scope="col">Total efforts</th>
               <th scope="col"><span hidden>Link</span></th>
@@ -51,7 +50,6 @@
                 <td>{{ segment.distance_m | miles }}</td>
                 <td>{{ segment.average_grade | percent }}</td>
                 <td>{{ segment.recent_efforts | count }}</td>
-                <td>{{ segment.all_time_efforts | count }}</td>
                 <td>{{ segment.athlete_count | count }}</td>
                 <td>{{ segment.effort_count | count }}</td>
                 <td><a href="https://www.strava.com/segments/{{ segment.id }}" target="_blank" rel="noopener">View on Strava</a></td>
@@ -63,5 +61,17 @@
     {% elif not active %}
       <p>No segments found in your road rides from the last 90 days.</p>
     {% endif %}
+  {% endif %}
+
+  {% if pooled %}
+    <form class="muted" method="post" action="/contributing/{{ 'off' if contributes else 'on' }}">
+      {% if contributes %}
+        Segments from your rides that are visible to everyone can appear on other riders' Most popular lists, without your name.
+        <button class="quiet">Turn this off</button>
+      {% else %}
+        Segments from your rides don't appear on other riders' lists.
+        <button class="quiet">Turn this on</button>
+      {% endif %}
+    </form>
   {% endif %}
 {% endblock %}

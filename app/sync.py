@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import psycopg
 
 from app.config import RIDE_WINDOW
+from app.db import delete_unused_segments
 from app.strava import NotFound, StravaClient
 
 Progress = Callable[[str, int, int], None]
@@ -70,7 +71,7 @@ def run_sync(
             """
             SELECT DISTINCT e.segment_id
             FROM efforts e
-            LEFT JOIN segments s ON s.athlete_id = e.athlete_id AND s.id = e.segment_id
+            LEFT JOIN segments s ON s.id = e.segment_id
             WHERE e.athlete_id = %s AND s.id IS NULL
             ORDER BY e.segment_id
             """,
@@ -89,18 +90,10 @@ def run_sync(
                 (athlete_id, segment_id),
             )
         else:
-            _save_segment(conn, athlete_id, segment, now)
+            _save_segment(conn, segment, now)
     progress("segments", len(missing_segments), len(missing_segments))
 
-    conn.execute(
-        """
-        DELETE FROM segments s
-        WHERE s.athlete_id = %s AND NOT EXISTS (
-            SELECT 1 FROM efforts e WHERE e.athlete_id = s.athlete_id AND e.segment_id = s.id
-        )
-        """,
-        (athlete_id,),
-    )
+    delete_unused_segments(conn)
 
 
 def _save_ride(conn: psycopg.Connection, athlete_id: int, activity: dict, now: datetime) -> None:
@@ -118,9 +111,13 @@ def _save_ride(conn: psycopg.Connection, athlete_id: int, activity: dict, now: d
                 continue
             conn.execute(
                 """
-                INSERT INTO efforts (id, athlete_id, ride_id, segment_id, start_date, fetched_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (id) DO UPDATE SET fetched_at = EXCLUDED.fetched_at
+                INSERT INTO efforts (
+                    id, athlete_id, ride_id, segment_id, start_date, shareable, fetched_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    shareable = EXCLUDED.shareable,
+                    fetched_at = EXCLUDED.fetched_at
                 """,
                 (
                     effort["id"],
@@ -128,31 +125,29 @@ def _save_ride(conn: psycopg.Connection, athlete_id: int, activity: dict, now: d
                     activity["id"],
                     effort["segment"]["id"],
                     _parse_time(effort["start_date"]),
+                    effort.get("visibility") == "everyone",
                     now,
                 ),
             )
 
 
-def _save_segment(conn: psycopg.Connection, athlete_id: int, segment: dict, now: datetime) -> None:
+def _save_segment(conn: psycopg.Connection, segment: dict, now: datetime) -> None:
     conn.execute(
         """
         INSERT INTO segments (
-            athlete_id, id, name, distance_m, average_grade, polyline,
-            athlete_count, effort_count, all_time_efforts, fetched_at
+            id, name, distance_m, average_grade, polyline, athlete_count, effort_count, fetched_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (athlete_id, id) DO UPDATE SET
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET
             name = EXCLUDED.name,
             distance_m = EXCLUDED.distance_m,
             average_grade = EXCLUDED.average_grade,
             polyline = EXCLUDED.polyline,
             athlete_count = EXCLUDED.athlete_count,
             effort_count = EXCLUDED.effort_count,
-            all_time_efforts = EXCLUDED.all_time_efforts,
             fetched_at = EXCLUDED.fetched_at
         """,
         (
-            athlete_id,
             segment["id"],
             segment["name"],
             segment.get("distance"),
@@ -160,7 +155,6 @@ def _save_segment(conn: psycopg.Connection, athlete_id: int, segment: dict, now:
             (segment.get("map") or {}).get("polyline"),
             segment.get("athlete_count"),
             segment.get("effort_count"),
-            (segment.get("athlete_segment_stats") or {}).get("effort_count"),
             now,
         ),
     )

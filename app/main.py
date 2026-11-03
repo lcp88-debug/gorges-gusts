@@ -2,6 +2,7 @@ import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -10,7 +11,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import CACHE_TTL, Settings, load_settings
 from app.db import Database
-from app.lists import DEFAULT_SORT, SORT_ORDERS, segment_list
+from app.lists import DEFAULT_SORT, SORT_ORDERS, has_missing_details, segment_list
 from app.strava import REQUIRED_SCOPE, AuthExpired, RateLimiter, StravaClient, StravaOAuth
 from app.tokens import TokenStore
 from app.worker import Worker, enqueue_sync
@@ -62,7 +63,12 @@ def create_app(
         athlete_id = request.session.get("athlete_id")
         if athlete_id is None:
             return templates.TemplateResponse(
-                request, "login.html", {"error": request.session.pop("login_error", None)}
+                request,
+                "login.html",
+                {
+                    "error": request.session.pop("login_error", None),
+                    "pooled": settings.pooled_most_popular,
+                },
             )
         if sort not in SORT_ORDERS:
             sort = DEFAULT_SORT
@@ -70,7 +76,7 @@ def create_app(
         now = datetime.now(timezone.utc)
         with db.connect() as conn:
             athlete = conn.execute(
-                "SELECT last_synced_at FROM athletes WHERE id = %s", (athlete_id,)
+                "SELECT last_synced_at, contributes FROM athletes WHERE id = %s", (athlete_id,)
             ).fetchone()
             if athlete is None:
                 request.session.clear()
@@ -78,12 +84,16 @@ def create_app(
             synced = athlete["last_synced_at"]
             lists_ready = synced is not None and now - synced < CACHE_TTL
             job = _latest_job(conn, athlete_id)
-            # A returning visitor's data may have expired. A failed job stays put
-            # until they press Refresh, so a broken login can't retry on every page load.
-            if not lists_ready and job is not None and job["status"] == "done":
+            # A returning visitor's data may have expired, and shared details can expire
+            # before their own rides do. A failed job stays put until they press Refresh,
+            # so a broken login can't retry on every page load.
+            needs_sync = not lists_ready or has_missing_details(conn, athlete_id)
+            if needs_sync and job is not None and job["status"] == "done":
                 enqueue_sync(conn, athlete_id)
                 job = _latest_job(conn, athlete_id)
-            segments = segment_list(conn, athlete_id, sort, now)
+            segments = segment_list(
+                conn, athlete_id, sort, now, pooled=settings.pooled_most_popular
+            )
 
         active = job is not None and job["status"] in ACTIVE_STATUSES
         return templates.TemplateResponse(
@@ -95,6 +105,8 @@ def create_app(
                 "show_lists": lists_ready or (job is not None and job["status"] == "done"),
                 "segments": segments,
                 "sort": sort,
+                "pooled": settings.pooled_most_popular,
+                "contributes": athlete["contributes"],
             },
         )
 
@@ -129,6 +141,12 @@ def create_app(
         athlete_id = tokens["athlete"]["id"]
         token_store.save_new_athlete(athlete_id, tokens, scope)
         with db.connect() as conn:
+            if settings.pooled_most_popular:
+                # They've just seen the notice. An earlier opt-out is left alone.
+                conn.execute(
+                    "UPDATE athletes SET contributes = TRUE WHERE id = %s AND contributes IS NULL",
+                    (athlete_id,),
+                )
             enqueue_sync(conn, athlete_id)
         request.session["athlete_id"] = athlete_id
         return RedirectResponse("/", status_code=303)
@@ -139,6 +157,17 @@ def create_app(
         if athlete_id is not None:
             with db.connect() as conn:
                 enqueue_sync(conn, athlete_id)
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/contributing/{choice}")
+    def set_contributing(request: Request, choice: Literal["on", "off"]):
+        athlete_id = request.session.get("athlete_id")
+        if athlete_id is not None:
+            with db.connect() as conn:
+                conn.execute(
+                    "UPDATE athletes SET contributes = %s WHERE id = %s",
+                    (choice == "on", athlete_id),
+                )
         return RedirectResponse("/", status_code=303)
 
     @app.post("/logout")
