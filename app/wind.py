@@ -145,7 +145,7 @@ class _Path:
 def build_steps(
     points: Sequence[tuple[float, float]],
     average_grade: float,
-    elevation_at: Callable[[float, float], float] | None = None,
+    elevation_at: Callable[[float, float], float | None] | None = None,
 ) -> list[Step]:
     """Walks a route in short steps, smoothing direction and gradient over longer distances.
 
@@ -179,17 +179,20 @@ def _map_grades(
     path: _Path,
     centres: Sequence[float],
     average_grade: float,
-    elevation_at: Callable[[float, float], float],
+    elevation_at: Callable[[float, float], float | None],
 ) -> list[float]:
     half = GRADE_WINDOW_M / 2
-    grades = []
+    grades: list[float | None] = []
     for centre in centres:
         start = max(centre - half, 0.0)
         end = min(centre + half, path.length)
-        rise = elevation_at(*path.at(end)) - elevation_at(*path.at(start))
-        grades.append(rise / (end - start))
-    shift = average_grade - sum(grades) / len(grades)
-    return [grade + shift for grade in grades]
+        low, high = elevation_at(*path.at(start)), elevation_at(*path.at(end))
+        grades.append(None if low is None or high is None else (high - low) / (end - start))
+    known = [grade for grade in grades if grade is not None]
+    if not known:
+        return [average_grade] * len(centres)
+    shift = average_grade - sum(known) / len(known)
+    return [average_grade if grade is None else grade + shift for grade in grades]
 
 
 def effort_power(profile: RiderProfile, duration_s: float) -> float:
@@ -216,7 +219,7 @@ def _solve_speed(
     if _power_needed(MAX_SPEED_MS, headwind, crosswind, grade, mass, density) <= power:
         return MAX_SPEED_MS
     low, high = 0.0, MAX_SPEED_MS
-    for _ in range(60):
+    for _ in range(32):
         middle = (low + high) / 2
         if _power_needed(middle, headwind, crosswind, grade, mass, density) < power:
             low = middle
@@ -225,42 +228,67 @@ def _solve_speed(
     return high
 
 
+def _wind_at(wind: Wind | Callable[[Step], Wind]) -> Callable[[Step], Wind]:
+    return wind if callable(wind) else lambda step: wind
+
+
 def _time_s(
     steps: Sequence[Step],
     power: float,
     mass: float,
-    wind: Wind | None,
-    shelter: ShelterFactor,
-    density: float,
+    wind_at: Callable[[Step], Wind],
+    shelter: ShelterFactor | None,
 ) -> float:
+    """Time over the steps. Without `shelter` the air is still, at the forecast's density."""
     total = 0.0
     for step in steps:
+        wind = wind_at(step)
         headwind = crosswind = 0.0
-        if wind is not None:
+        if shelter is not None:
             at_rider = wind.speed_ms * shelter(step, wind.from_degrees)
             angle = math.radians(wind.from_degrees - step.bearing)
             headwind = at_rider * math.cos(angle)
             crosswind = at_rider * math.sin(angle)
-        total += step.length_m / _solve_speed(power, headwind, crosswind, step.grade, mass, density)
+        speed = _solve_speed(power, headwind, crosswind, step.grade, mass, wind.air_density)
+        total += step.length_m / speed
     return total
 
 
-def wind_effect(
-    steps: Sequence[Step], profile: RiderProfile, wind: Wind, shelter: ShelterFactor
-) -> WindEffect:
-    """The % change in the rider's time at the power they'd hold with no wind."""
+def segment_power(steps: Sequence[Step], profile: RiderProfile) -> float:
+    """The power the rider would hold for this segment with no wind."""
     mass = profile.weight_kg + BIKE_KG
-    density = wind.air_density
-
+    standard_air = lambda step: Wind(0.0, 0.0)  # noqa: E731
     # A rider's power depends on how long the effort lasts, which depends on their power.
     power = profile.power_20min_w
-    for _ in range(20):
-        duration = _time_s(steps, power, mass, None, shelter, density)
-        power = effort_power(profile, duration)
+    for _ in range(8):
+        power = effort_power(profile, _time_s(steps, power, mass, standard_air, None))
+    return power
 
-    still = _time_s(steps, power, mass, None, shelter, density)
-    windy = _time_s(steps, power, mass, wind, shelter, density)
+
+def wind_effect(
+    steps: Sequence[Step],
+    profile: RiderProfile,
+    wind: Wind | Callable[[Step], Wind],
+    shelter: ShelterFactor,
+    power: float | None = None,
+) -> WindEffect:
+    """The % change in the rider's time at the power they'd hold with no wind.
+
+    `wind` can be one forecast or a function giving each step its own. Pass `power` from
+    `segment_power` when working out many hours for the same segment.
+    """
+    mass = profile.weight_kg + BIKE_KG
+    wind_at = _wind_at(wind)
+    if power is None:
+        power = segment_power(steps, profile)
+    still = _time_s(steps, power, mass, wind_at, None)
+    windy = _time_s(steps, power, mass, wind_at, shelter)
     return WindEffect(
         percent=(windy / still - 1) * 100,
-        steep_descent=any(step.grade <= STEEP_DESCENT_GRADE for step in steps),
+        steep_descent=has_steep_descent(steps),
     )
+
+
+def has_steep_descent(steps: Sequence[Step]) -> bool:
+    """Part of the "less certain" mark."""
+    return any(step.grade <= STEEP_DESCENT_GRADE for step in steps)

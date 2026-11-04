@@ -1,12 +1,14 @@
 {% extends "base.html" %}
-{% block head %}{% if active %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
+{% block head %}{% if active or reload_for_wind %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
 {% block actions %}
   <div class="actions">
     <form method="post" action="/refresh"><button{% if active %} disabled{% endif %}>Refresh</button></form>
     <form method="post" action="/logout"><button class="quiet">Log out</button></form>
   </div>
 {% endblock %}
+{% macro wind_cell(row, certain) %}{% if row %}{{ row.percent | wind_percent }}{% if not certain %} <abbr title="Less certain: steep ground or a steep descent">~</abbr>{% endif %}{% else %}–{% endif %}{% endmacro %}
 {% block content %}
+  {% if profile_error %}<p class="notice error" role="alert">{{ profile_error }}</p>{% endif %}
   {% if active %}
     <div class="notice" role="status">
       {% if job.status == "paused" %}
@@ -38,6 +40,9 @@
               <th scope="col">Distance</th>
               <th scope="col">Avg grade</th>
               <th scope="col">Your efforts, 90 days</th>
+              <th scope="col"><a href="/?sort={{ sort }}&amp;by=now"{% if by == "now" %} aria-current="true"{% endif %}>Now</a></th>
+              <th scope="col"><a href="/?sort={{ sort }}&amp;by=best"{% if by == "best" %} aria-current="true"{% endif %}>Best</a></th>
+              <th scope="col">Next 48 hours</th>
               <th scope="col">Athletes</th>
               <th scope="col">Total efforts</th>
               <th scope="col"><span hidden>Link</span></th>
@@ -50,6 +55,24 @@
                 <td>{{ segment.distance_m | miles }}</td>
                 <td>{{ segment.average_grade | percent }}</td>
                 <td>{{ segment.recent_efforts | count }}</td>
+                <td>{{ wind_cell(segment.wind_now, not segment.less_certain) }}</td>
+                <td>{{ wind_cell(segment.wind_best, not segment.less_certain) }}{% if segment.wind_best %}<br><span class="muted">{{ segment.wind_best.hour | hour }}</span>{% endif %}</td>
+                <td>
+                  {% if segment.wind_hours %}
+                    <details>
+                      <summary>Hours</summary>
+                      <table class="hours">
+                        {% for hour in segment.wind_hours %}
+                          <tr>
+                            <td>{{ hour.hour | hour }}</td>
+                            <td>{{ wind_cell(hour, not segment.less_certain) }}</td>
+                            <td class="muted">{{ hour.speed_ms | mph }} from {{ hour.from_degrees | compass }}</td>
+                          </tr>
+                        {% endfor %}
+                      </table>
+                    </details>
+                  {% else %}–{% endif %}
+                </td>
                 <td>{{ segment.athlete_count | count }}</td>
                 <td>{{ segment.effort_count | count }}</td>
                 <td><a href="https://www.strava.com/segments/{{ segment.id }}" target="_blank" rel="noopener">View on Strava</a></td>
@@ -59,8 +82,33 @@
         </table>
       </div>
     {% elif not active %}
-      <p>No segments found in your road rides from the last 90 days.</p>
+      <p>No segments in this area found in your road rides from the last 90 days.</p>
     {% endif %}
+  {% endif %}
+
+  {% if show_lists %}
+    <p class="muted">
+      Wind numbers are estimates from forecast wind: the change in your time at the same effort, compared with no wind. Negative means faster. ~ means less certain.
+      {% if wind_pending and segments %}Working out the latest wind…{% endif %}
+    </p>
+    <details class="muted">
+      <summary>Your weight and power</summary>
+      <form method="post" action="/profile" class="profile">
+        <label>Weight (kg)
+          <input name="weight_kg" type="number" step="0.1" min="{{ weight_range[0] }}" max="{{ weight_range[1] }}" placeholder="{{ default_weight | int }}" value="{{ athlete.weight_kg if athlete.weight_kg is not none else '' }}">
+        </label>
+        <label>Best 20-minute power (W)
+          <input name="power_20min_w" type="number" step="1" min="{{ power_range[0] }}" max="{{ power_range[1] }}" placeholder="{{ default_power | int }}" value="{{ athlete.power_20min_w if athlete.power_20min_w is not none else '' }}">
+        </label>
+        <button class="quiet">Save</button>
+      </form>
+      Leave a box empty to use the standard value shown in it.
+    </details>
+    <p class="muted credits">
+      Weather data by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a>.
+      Land cover: © ESA WorldCover project 2021, contains modified Copernicus Sentinel data (2021) processed by the ESA WorldCover consortium.
+      Elevation: Copernicus DEM GLO-30, © DLR e.V. 2010–2014 and © Airbus Defence and Space GmbH 2014–2018, provided under COPERNICUS by the European Union and ESA.
+    </p>
   {% endif %}
 
   {% if pooled %}

@@ -15,6 +15,29 @@ ATHLETE = 1001
 OTHER_ATHLETE = 2002
 
 
+def encode_route(points):
+    """Encodes made-up (latitude, longitude) points as a polyline."""
+
+    def encode_value(value):
+        number = round(value * 1e5)
+        number = ~(number << 1) if number < 0 else number << 1
+        text = ""
+        while number >= 0x20:
+            text += chr((0x20 | (number & 0x1F)) + 63)
+            number >>= 5
+        return text + chr(number + 63)
+
+    text, last_lat, last_lng = "", 0.0, 0.0
+    for lat, lng in points:
+        text += encode_value(lat - last_lat) + encode_value(lng - last_lng)
+        last_lat, last_lng = lat, lng
+    return text
+
+
+LOCAL_ROUTE = encode_route([(42.4, -76.5), (42.41, -76.5)])
+OUTSIDE_ROUTE = encode_route([(44.0, -120.0), (44.01, -120.0)])
+
+
 class FakeStrava:
     """Stands in for StravaClient, serving made-up data and recording its calls."""
 
@@ -75,7 +98,7 @@ class FakeStrava:
             "distance": 1609.34,
             "average_grade": 4.5,
             "private": False,
-            "map": {"polyline": f"poly{segment_id}"},
+            "map": {"polyline": LOCAL_ROUTE},
             "athlete_count": athletes,
             "effort_count": efforts,
             "athlete_segment_stats": {"effort_count": mine},
@@ -93,7 +116,7 @@ def db():
     database = Database(os.environ["TEST_DATABASE_URL"])
     database.init_schema()
     with database.connect() as conn:
-        conn.execute("TRUNCATE athletes, rides, efforts, segments, sync_jobs CASCADE")
+        conn.execute("TRUNCATE athletes, rides, efforts, segments, sync_jobs, forecasts CASCADE")
     return database
 
 

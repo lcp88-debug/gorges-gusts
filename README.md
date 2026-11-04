@@ -40,3 +40,9 @@ Tests use made-up data and the `TEST_DATABASE_URL` database, and never contact S
 ```sh
 .venv/bin/python -m pytest
 ```
+
+### Wind maps
+
+The lists only cover the region set in `app/region.py`. Segments with any part of their route outside it don't appear and use no maps or weather calls.
+
+The first wind update downloads land cover and elevation maps for the region to `~/.local/share/gorges-gusts/maps`, about 220 MB in total. They're kept for next time, and it's safe to delete them because they download again when needed.

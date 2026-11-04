@@ -4,19 +4,35 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import CACHE_TTL, Settings, load_settings
 from app.db import Database
-from app.lists import DEFAULT_SORT, SORT_ORDERS, has_missing_details, segment_list
+from app.lists import (
+    DEFAULT_SORT,
+    SORT_ORDERS,
+    WIND_SORTS,
+    add_wind,
+    has_missing_details,
+    segment_list,
+    sort_by_wind,
+)
+from app.maps import Maps
 from app.strava import REQUIRED_SCOPE, AuthExpired, RateLimiter, StravaClient, StravaOAuth
 from app.tokens import TokenStore
+from app.weather import fetch_forecasts
+from app.wind import DEFAULT_POWER_20MIN_W, DEFAULT_WEIGHT_KG
+from app.wind_updates import update_next_rider, wind_pending
 from app.worker import Worker, enqueue_sync
 
 METERS_PER_MILE = 1609.34
+MPH_PER_MS = 2.23694
+WEIGHT_RANGE_KG = (30, 200)
+POWER_RANGE_W = (50, 600)
+COMPASS = ("N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW")
 ACTIVE_STATUSES = ("pending", "running", "paused")
 
 templates = Jinja2Templates(directory=Path(__file__).with_name("templates"))
@@ -26,6 +42,34 @@ templates.env.filters["miles"] = lambda meters: (
 templates.env.filters["percent"] = lambda grade: "–" if grade is None else f"{grade:.1f}%"
 templates.env.filters["count"] = lambda value: "–" if value is None else f"{value:,}"
 templates.env.filters["localtime"] = lambda value: value.astimezone().strftime("%H:%M")
+
+
+def _wind_percent(percent: float) -> str:
+    rounded = round(percent)
+    if rounded == 0:
+        return "0%"
+    return f"+{rounded}%" if rounded > 0 else f"\u2212{-rounded}%"
+
+
+def _hour(value: datetime) -> str:
+    local = value.astimezone()
+    return f"{local:%a} {local.hour % 12 or 12}{'am' if local.hour < 12 else 'pm'}"
+
+
+templates.env.filters["wind_percent"] = _wind_percent
+templates.env.filters["hour"] = _hour
+templates.env.filters["mph"] = lambda speed: f"{speed * MPH_PER_MS:.0f} mph"
+templates.env.filters["compass"] = lambda degrees: COMPASS[round(degrees / 22.5) % 16]
+
+
+def _in_range(text: str, limits: tuple[int, int]) -> float | None:
+    """A number within `limits`, or None for a blank entry. Raises ValueError otherwise."""
+    if not text.strip():
+        return None
+    value = float(text)
+    if not limits[0] <= value <= limits[1]:  # Also rejects "nan".
+        raise ValueError(text)
+    return value
 
 
 def create_app(
@@ -41,7 +85,13 @@ def create_app(
     def client_for(athlete_id: int) -> StravaClient:
         return StravaClient(lambda: token_store.access_token(athlete_id), limiter)
 
-    worker = Worker(db, client_for)
+    worker = Worker(
+        db,
+        client_for,
+        update_wind=lambda conn, now: update_next_rider(
+            conn, Maps(settings.map_dir), fetch_forecasts, now, settings.pooled_most_popular
+        ),
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -59,7 +109,7 @@ def create_app(
     app.state.worker = worker
 
     @app.get("/", response_class=HTMLResponse)
-    def home(request: Request, sort: str = DEFAULT_SORT):
+    def home(request: Request, sort: str = DEFAULT_SORT, by: str = ""):
         athlete_id = request.session.get("athlete_id")
         if athlete_id is None:
             return templates.TemplateResponse(
@@ -76,7 +126,12 @@ def create_app(
         now = datetime.now(timezone.utc)
         with db.connect() as conn:
             athlete = conn.execute(
-                "SELECT last_synced_at, contributes FROM athletes WHERE id = %s", (athlete_id,)
+                """
+                UPDATE athletes SET last_seen_at = %s WHERE id = %s
+                RETURNING last_synced_at, contributes, weight_kg, power_20min_w,
+                          wind_stale, wind_started_at, wind_updated_at
+                """,
+                (now, athlete_id),
             ).fetchone()
             if athlete is None:
                 request.session.clear()
@@ -94,8 +149,17 @@ def create_app(
             segments = segment_list(
                 conn, athlete_id, sort, now, pooled=settings.pooled_most_popular
             )
+            add_wind(conn, athlete_id, segments, now)
+        by = by if by in WIND_SORTS else ""
+        if by:
+            segments = sort_by_wind(segments, by)
 
         active = job is not None and job["status"] in ACTIVE_STATUSES
+        # Without a worker running, nothing is going to change.
+        pending = start_worker and wind_pending(athlete, now)
+        # The routine hourly update stays quiet, because reloading closes open hour views.
+        has_numbers = any(segment["wind_hours"] for segment in segments)
+        reload_for_wind = pending and bool(segments) and (athlete["wind_stale"] or not has_numbers)
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -105,6 +169,15 @@ def create_app(
                 "show_lists": lists_ready or (job is not None and job["status"] == "done"),
                 "segments": segments,
                 "sort": sort,
+                "by": by,
+                "wind_pending": pending,
+                "reload_for_wind": reload_for_wind,
+                "athlete": athlete,
+                "default_weight": DEFAULT_WEIGHT_KG,
+                "default_power": DEFAULT_POWER_20MIN_W,
+                "weight_range": WEIGHT_RANGE_KG,
+                "power_range": POWER_RANGE_W,
+                "profile_error": request.session.pop("profile_error", None),
                 "pooled": settings.pooled_most_popular,
                 "contributes": athlete["contributes"],
             },
@@ -168,6 +241,29 @@ def create_app(
                     "UPDATE athletes SET contributes = %s WHERE id = %s",
                     (choice == "on", athlete_id),
                 )
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/profile")
+    def save_profile(request: Request, weight_kg: str = Form(""), power_20min_w: str = Form("")):
+        athlete_id = request.session.get("athlete_id")
+        if athlete_id is not None:
+            try:
+                weight = _in_range(weight_kg, WEIGHT_RANGE_KG)
+                power = _in_range(power_20min_w, POWER_RANGE_W)
+            except ValueError:
+                request.session["profile_error"] = (
+                    f"Weight must be {WEIGHT_RANGE_KG[0]}\u2013{WEIGHT_RANGE_KG[1]} kg and power "
+                    f"{POWER_RANGE_W[0]}\u2013{POWER_RANGE_W[1]} W. Nothing was changed."
+                )
+            else:
+                with db.connect() as conn:
+                    conn.execute(
+                        """
+                        UPDATE athletes SET weight_kg = %s, power_20min_w = %s, wind_stale = TRUE
+                        WHERE id = %s
+                        """,
+                        (weight, power, athlete_id),
+                    )
         return RedirectResponse("/", status_code=303)
 
     @app.post("/logout")

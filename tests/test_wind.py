@@ -92,6 +92,10 @@ class TestBuildSteps:
         steps = build_steps(line_north(2000), 0.05, elevation)
         assert sum(step.grade for step in steps) / len(steps) == pytest.approx(0.05)
 
+    def test_gaps_in_the_map_use_the_average_grade(self):
+        steps = build_steps(line_north(500), 0.05, lambda lat, lng: None)
+        assert {step.grade for step in steps} == {0.05}
+
     def test_smoothing_keeps_direction_accurate_on_a_wobbly_route(self):
         random.seed(1)
         wobble = 3 / METERS_PER_DEGREE_LAT
@@ -148,6 +152,12 @@ class TestWindEffect:
         calm = wind_effect(steps, RIDER, Wind(5, 0), lambda step, wind_from: 0.0).percent
         assert 0 == pytest.approx(calm)
         assert 0 < woods < open_road
+
+    def test_each_step_can_have_its_own_wind(self):
+        steps = road(1000, 0, 0.0)
+        one = wind_effect(steps, RIDER, Wind(5, 0), FULL_WIND).percent
+        same = wind_effect(steps, RIDER, lambda step: Wind(5, 0), FULL_WIND).percent
+        assert same == pytest.approx(one)
 
     def test_shelter_receives_the_wind_direction(self):
         seen = []
