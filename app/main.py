@@ -21,10 +21,13 @@ from app.lists import (
     build_list,
     can_sort,
     choose_sort,
+    CLIMB_CATEGORIES,
     filter_boxes,
     has_missing_details,
     load_list_settings,
     parse_filter_form,
+    segment_list,
+    tick_choices,
     save_list_settings,
 )
 from app.maps import Maps
@@ -36,7 +39,6 @@ from app.wind_updates import update_next_rider, wind_pending
 from app.worker import Worker, enqueue_sync
 
 # Strava's climb_category, 0 to 5, as riders know it.
-CLIMB_CATEGORIES = ("none", "4", "3", "2", "1", "HC")
 MPH_PER_MS = 2.23694
 WEIGHT_RANGE_KG = (30, 200)
 POWER_RANGE_W = (50, 600)
@@ -175,6 +177,8 @@ def create_app(
             segments = build_list(
                 conn, athlete_id, list, list_settings, now, pooled=settings.pooled_explore
             )
+            # Tick boxes list what is on the list before filtering, so a ticked town can be unticked.
+            whole_list = segment_list(conn, athlete_id, list, now, settings.pooled_explore)
 
         active = job is not None and job["status"] in ACTIVE_STATUSES
         # Without a worker running, nothing is going to change.
@@ -194,6 +198,11 @@ def create_app(
                 "fields": FIELDS,
                 "list_settings": list_settings,
                 "filter_boxes": filter_boxes(list_settings.filters),
+                "tick_choices": {
+                    key: tick_choices(key, whole_list, list_settings.filters.get(key))
+                    for key, field_info in FIELDS.items()
+                    if field_info.kind == "ticks"
+                },
                 "filter_error": request.session.pop("filter_error", None),
                 "wind_pending": pending,
                 "reload_for_wind": reload_for_wind,

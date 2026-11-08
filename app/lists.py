@@ -87,6 +87,10 @@ FIELDS: dict[str, Field] = {
 DEFAULT_SORTS = {"my_segments": "your_attempts", "explore": "people_on_strava"}
 
 
+# Strava's climb category 0 to 5 as the list shows it, so a category is its position here.
+CLIMB_CATEGORIES = ("none", "4", "3", "2", "1", "HC")
+
+
 @dataclass
 class ListSettings:
     """A rider's choices for one list. `filters` is {field key: filter}, see "Filters" below."""
@@ -147,6 +151,9 @@ def save_list_settings(
 # for fields that are filtered. What a filter looks like depends on the field's kind:
 #   number: {"min": 1.5, "max": 4}  either key may be left out; in the units the list shows
 #           (miles, feet, percent; seconds for a time field, shown and typed as m:ss).
+#   ticks:  ["Ithaca", "Dryden"] or [0, 4, 5]  the values to keep (towns; Strava's 0 to 5
+#           climb categories, where 0 "none" is a real value). A blank never passes.
+#   search: "gorge"  kept when the segment's name contains it, ignoring capitals.
 # Each kind has a FilterKind in FILTER_KINDS saying how to read the form, check a saved
 # value, and test a row. The filter form is one form holding every box, and it replaces the
 # whole set: a field with all its boxes empty is simply not filtered.
@@ -165,7 +172,8 @@ class FilterKind:
     # Whether a row's value passes. Only called on a filtered field.
     matches: Callable[[object, object, Field], bool]
     # Text for each box when the form is shown: {box name suffix: text}.
-    show: Callable[[object, Field], dict[str, str]]
+    # Ticks show {"ticked": [...]} and search {"text": ...}.
+    show: Callable[[object, Field], dict[str, object]]
 
 
 def parse_time(text: str) -> float:
@@ -243,8 +251,79 @@ def show_number_filter(bounds: object, field_info: Field) -> dict[str, str]:
     return {"min": text("min"), "max": text("max")}
 
 
-# Add a kind here to make its fields filterable (the ticks and search tickets do).
+# Tick boxes are posted as one box per value, named `<key>_<value>` (climb_category_0,
+# town_Ithaca), so a ticked box is any form entry starting with `<key>_`.
+def _ticked_values(key: str, form: Mapping[str, str]) -> list[str]:
+    prefix = f"{key}_"
+    return [name[len(prefix):] for name in form if name.startswith(prefix)]
+
+
+def parse_ticks_filter(key: str, form: Mapping[str, str]) -> list | None:
+    values = _ticked_values(key, form)
+    if key == "climb_category":
+        categories = set()
+        for value in values:
+            if value not in {str(number) for number in range(len(CLIMB_CATEGORIES))}:
+                raise FilterError(f"{FIELDS[key].label}: \u201c{value}\u201d isn't a category.")
+            categories.add(int(value))
+        return sorted(categories) or None
+    return sorted(set(values)) or None
+
+
+def clean_ticks_filter(saved: object) -> list | None:
+    if not isinstance(saved, list):
+        return None
+    kept = [value for value in saved if isinstance(value, (str, int)) and not isinstance(value, bool)]
+    return kept or None
+
+
+def ticks_matches(value: object, saved: list, field_info: Field) -> bool:
+    return value is not None and value in saved
+
+
+def show_ticks_filter(saved: object, field_info: Field) -> dict[str, object]:
+    return {"ticked": [str(value) for value in saved or []]}
+
+
+def parse_search_filter(key: str, form: Mapping[str, str]) -> str | None:
+    return form.get(f"{key}_search", "").strip() or None
+
+
+def clean_search_filter(saved: object) -> str | None:
+    return saved if isinstance(saved, str) and saved.strip() else None
+
+
+def search_matches(value: object, saved: str, field_info: Field) -> bool:
+    return value is not None and saved.strip().lower() in str(value).lower()
+
+
+def show_search_filter(saved: object, field_info: Field) -> dict[str, object]:
+    return {"text": saved or ""}
+
+
+def tick_choices(key: str, rows: list[dict], saved: object) -> list[tuple[str, str]]:
+    """The tick boxes to show for a field: (value, label). Towns are only those in `rows`,
+    plus any still ticked from before so they can be unticked."""
+    if key == "climb_category":
+        return [(str(number), label) for number, label in enumerate(CLIMB_CATEGORIES)]
+    towns = {row[key] for row in rows if row[key]} | {str(value) for value in saved or []}
+    return [(town, town) for town in sorted(towns, key=str.lower)]
+
+
+# Add a kind here to make its fields filterable.
 FILTER_KINDS: dict[str, FilterKind] = {
+    "ticks": FilterKind(
+        parse=parse_ticks_filter,
+        clean=clean_ticks_filter,
+        matches=ticks_matches,
+        show=show_ticks_filter,
+    ),
+    "search": FilterKind(
+        parse=parse_search_filter,
+        clean=clean_search_filter,
+        matches=search_matches,
+        show=show_search_filter,
+    ),
     "number": FilterKind(
         parse=parse_number_filter,
         clean=clean_number_filter,
@@ -280,8 +359,8 @@ def parse_filter_form(form: Mapping[str, str]) -> dict:
     return filters
 
 
-def filter_boxes(filters: dict) -> dict[str, dict[str, str]]:
-    """For each filterable field, the text to show in its boxes: {key: {"min": "", ...}}."""
+def filter_boxes(filters: dict) -> dict[str, dict[str, object]]:
+    """For each filterable field, what to show in its boxes: {key: {"min": "", ...}}."""
     return {
         key: FILTER_KINDS[field_info.kind].show(filters.get(key), field_info)
         for key, field_info in FIELDS.items()

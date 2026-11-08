@@ -41,10 +41,22 @@
       <form method="post" action="/filters">
         <input type="hidden" name="list" value="{{ list }}">
         {% for key, boxes in filter_boxes.items() %}
+          {% if fields[key].kind == "number" %}
           <div><span>{{ fields[key].label }}</span>
             <label>Min <input name="{{ key }}_min" value="{{ boxes.min }}" placeholder="{{ 'm:ss' if fields[key].is_time else '' }}"></label>
             <label>Max <input name="{{ key }}_max" value="{{ boxes.max }}" placeholder="{{ 'm:ss' if fields[key].is_time else '' }}"></label>
           </div>
+          {% elif fields[key].kind == "search" %}
+          <div><label>{{ fields[key].label }} contains <input name="{{ key }}_search" value="{{ boxes.text }}"></label></div>
+          {% elif fields[key].kind == "ticks" %}
+          <div><span>{{ fields[key].label }}</span>
+            {% for value, label in tick_choices[key] %}
+              <label><input type="checkbox" name="{{ key }}_{{ value }}" {% if value in boxes.ticked %}checked{% endif %}> {{ label }}</label>
+            {% else %}
+              <em>none on this list</em>
+            {% endfor %}
+          </div>
+          {% endif %}
         {% endfor %}
         <button>Apply filters</button>
       </form>
