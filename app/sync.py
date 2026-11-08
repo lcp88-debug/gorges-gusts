@@ -6,6 +6,7 @@ from psycopg import sql
 
 from app.config import RIDE_WINDOW
 from app.db import delete_unused_segments
+from app.lists import parse_time
 from app.strava import NotFound, StravaClient
 
 Progress = Callable[[str, int, int], None]
@@ -31,6 +32,7 @@ def run_sync(
     athlete_id: int,
     now: datetime,
     progress: Progress = lambda phase, done, total: None,
+    fastest_time: bool = False,
 ) -> None:
     """Bring one athlete's cached rides, efforts and segments up to date.
 
@@ -91,7 +93,7 @@ def run_sync(
                 (athlete_id, segment_id),
             )
         else:
-            _save_segment(conn, segment, now)
+            _save_segment(conn, segment, now, fastest_time)
     progress("segments", len(missing_segments), len(missing_segments))
 
     delete_unused_segments(conn)
@@ -135,10 +137,21 @@ def _save_ride(conn: psycopg.Connection, athlete_id: int, activity: dict, now: d
             )
 
 
-def segment_details(segment: dict) -> dict:
+def read_overall_time(text: object) -> int | None:
+    """Strava's overall time text, such as "3:49" or "1:02:03", as seconds. Blank if unreadable."""
+    if not isinstance(text, str):
+        return None
+    try:
+        return int(parse_time(text.strip()))
+    except ValueError:
+        return None
+
+
+def segment_details(segment: dict, fastest_time: bool = False) -> dict:
     """The segment details we keep from Strava's segment reply, keyed by column name.
 
-    A missing value is stored as blank.
+    A missing value is stored as blank. Fastest time is only read with the setting on,
+    and Strava's reply says who set it, which is never kept.
     """
     return {
         "id": segment["id"],
@@ -152,11 +165,16 @@ def segment_details(segment: dict) -> dict:
         "maximum_grade": segment.get("maximum_grade"),
         "climb_category": segment.get("climb_category"),
         "elevation_gain_m": segment.get("total_elevation_gain"),
+        "fastest_time_s": (
+            read_overall_time((segment.get("xoms") or {}).get("overall")) if fastest_time else None
+        ),
     }
 
 
-def _save_segment(conn: psycopg.Connection, segment: dict, now: datetime) -> None:
-    details = {**segment_details(segment), "fetched_at": now}
+def _save_segment(
+    conn: psycopg.Connection, segment: dict, now: datetime, fastest_time: bool = False
+) -> None:
+    details = {**segment_details(segment, fastest_time), "fetched_at": now}
     columns = sql.SQL(", ").join(map(sql.Identifier, details))
     updates = sql.SQL(", ").join(
         sql.SQL("{0} = EXCLUDED.{0}").format(sql.Identifier(column))

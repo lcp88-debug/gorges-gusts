@@ -97,6 +97,7 @@
               <th scope="col">Next 48 hours</th>
               {{ sort_heading("people_on_strava") }}
               {{ sort_heading("total_attempts") }}
+              {% if fastest_time %}{{ sort_heading("fastest_time") }}{% endif %}
               <th scope="col"><span hidden>Link</span></th>
             </tr>
           </thead>
@@ -132,6 +133,7 @@
                 </td>
                 <td>{{ segment.athlete_count | count }}</td>
                 <td>{{ segment.effort_count | count }}</td>
+                {% if fastest_time %}<td>{{ segment.fastest_time_s | duration }}</td>{% endif %}
                 <td><a href="https://www.strava.com/segments/{{ segment.id }}" target="_blank" rel="noopener">View on Strava</a></td>
               </tr>
             {% endfor %}

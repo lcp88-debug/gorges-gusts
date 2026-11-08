@@ -82,7 +82,22 @@ FIELDS: dict[str, Field] = {
         "People on Strava", "number", "desc", lambda row: row["athlete_count"]
     ),
     "total_attempts": Field("Total attempts", "number", "desc", lambda row: row["effort_count"]),
+    # Seconds, fastest first. Only exists while the fastest-time setting is on.
+    "fastest_time": Field(
+        "Fastest time", "number", "asc", lambda row: row["fastest_time_s"], is_time=True
+    ),
 }
+
+# Fields that only exist while their app setting is on.
+SETTING_FIELDS = {"fastest_time"}
+
+
+def active_fields(fastest_time: bool = False) -> dict[str, Field]:
+    """The fields the list has. Without the fastest-time setting, that field is absent from
+    the heading, sorting and filters, and saved settings on it are ignored."""
+    if fastest_time:
+        return FIELDS
+    return {key: info for key, info in FIELDS.items() if key not in SETTING_FIELDS}
 
 DEFAULT_SORTS = {"my_segments": "your_attempts", "explore": "people_on_strava"}
 
@@ -105,7 +120,9 @@ def default_settings(kind: str) -> ListSettings:
     return ListSettings(sort_field, FIELDS[sort_field].first)
 
 
-def load_list_settings(conn: psycopg.Connection, athlete_id: int, kind: str) -> ListSettings:
+def load_list_settings(
+    conn: psycopg.Connection, athlete_id: int, kind: str, fastest_time: bool = False
+) -> ListSettings:
     """The rider's saved settings for list `kind`, or the defaults if nothing is saved.
 
     A saved sort on a field that's unknown or can't be sorted falls back to the default sort.
@@ -120,9 +137,9 @@ def load_list_settings(conn: psycopg.Connection, athlete_id: int, kind: str) -> 
     if row is None:
         return default_settings(kind)
     settings = ListSettings(
-        row["sort_field"], row["sort_direction"], clean_filters(row["filters"])
+        row["sort_field"], row["sort_direction"], clean_filters(row["filters"], fastest_time)
     )
-    sort = FIELDS.get(settings.sort_field)
+    sort = active_fields(fastest_time).get(settings.sort_field)
     if sort is None or sort.first is None or settings.sort_direction not in ("asc", "desc"):
         default = default_settings(kind)
         settings.sort_field, settings.sort_direction = default.sort_field, default.sort_direction
@@ -333,13 +350,14 @@ FILTER_KINDS: dict[str, FilterKind] = {
 }
 
 
-def clean_filters(saved: object) -> dict:
+def clean_filters(saved: object, fastest_time: bool = False) -> dict:
     """Saved filters without unknown fields or malformed entries."""
     if not isinstance(saved, dict):
         return {}
     cleaned = {}
+    fields = active_fields(fastest_time)
     for key, value in saved.items():
-        field_info = FIELDS.get(key)
+        field_info = fields.get(key)
         kind = FILTER_KINDS.get(field_info.kind) if field_info else None
         if kind is not None:
             kept = kind.clean(value)
@@ -348,10 +366,10 @@ def clean_filters(saved: object) -> dict:
     return cleaned
 
 
-def parse_filter_form(form: Mapping[str, str]) -> dict:
+def parse_filter_form(form: Mapping[str, str], fastest_time: bool = False) -> dict:
     """The filters a submitted form describes. Raises FilterError on the first bad entry."""
     filters = {}
-    for key, field_info in FIELDS.items():
+    for key, field_info in active_fields(fastest_time).items():
         kind = FILTER_KINDS.get(field_info.kind)
         parsed = kind.parse(key, form) if kind is not None else None
         if parsed is not None:
@@ -359,26 +377,32 @@ def parse_filter_form(form: Mapping[str, str]) -> dict:
     return filters
 
 
-def filter_boxes(filters: dict) -> dict[str, dict[str, object]]:
+def filter_boxes(filters: dict, fastest_time: bool = False) -> dict[str, dict[str, object]]:
     """For each filterable field, what to show in its boxes: {key: {"min": "", ...}}."""
     return {
         key: FILTER_KINDS[field_info.kind].show(filters.get(key), field_info)
-        for key, field_info in FIELDS.items()
+        for key, field_info in active_fields(fastest_time).items()
         if field_info.kind in FILTER_KINDS
     }
 
 
-def filter_segments(segments: list[dict], filters: dict) -> list[dict]:
+def filter_segments(
+    segments: list[dict], filters: dict, fastest_time: bool = False
+) -> list[dict]:
     """The segments that pass every filter."""
+    fields = active_fields(fastest_time)
     for key, saved in filters.items():
-        field_info = FIELDS[key]
+        field_info = fields.get(key)
+        if field_info is None:
+            continue  # Left over from a setting that's now off.
         matches = FILTER_KINDS[field_info.kind].matches
         segments = [row for row in segments if matches(field_info.value(row), saved, field_info)]
     return segments
 
 
-def can_sort(field_key: str) -> bool:
-    return field_key in FIELDS and FIELDS[field_key].first is not None
+def can_sort(field_key: str, fastest_time: bool = False) -> bool:
+    fields = active_fields(fastest_time)
+    return field_key in fields and fields[field_key].first is not None
 
 
 def choose_sort(settings: ListSettings, field_key: str) -> None:
@@ -449,6 +473,7 @@ def build_list(
     settings: ListSettings,
     now: datetime,
     pooled: bool = False,
+    fastest_time: bool = False,
     time_range: TimeRange | None = None,
 ) -> list[dict]:
     """A rider's list `kind` with every field filled in and their settings applied.
@@ -457,7 +482,7 @@ def build_list(
     """
     segments = segment_list(conn, athlete_id, kind, now, pooled)
     add_wind(conn, athlete_id, segments, now, time_range)
-    return sort_segments(filter_segments(segments, settings.filters), settings)
+    return sort_segments(filter_segments(segments, settings.filters, fastest_time), settings)
 
 
 def has_missing_details(conn: psycopg.Connection, athlete_id: int) -> bool:
@@ -487,7 +512,7 @@ def segment_list(
     rows = conn.execute(
         """
         SELECT s.polyline, s.id, s.name, s.town, s.distance_m, s.average_grade, s.maximum_grade,
-               s.elevation_gain_m, s.climb_category, s.athlete_count, s.effort_count,
+               s.elevation_gain_m, s.climb_category, s.athlete_count, s.effort_count, s.fastest_time_s,
                COUNT(e.id) FILTER (WHERE e.athlete_id = %(athlete_id)s) AS recent_efforts,
                MIN(e.elapsed_s) FILTER (WHERE e.athlete_id = %(athlete_id)s) AS recent_best
         FROM segments s
