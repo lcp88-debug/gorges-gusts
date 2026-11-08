@@ -83,6 +83,8 @@ CREATE TABLE IF NOT EXISTS segments (
     -- Strava's 0 to 5: 0 is not a climb, 1 is category 4 and 5 is HC.
     climb_category INTEGER,
     elevation_gain_m DOUBLE PRECISION,
+    -- Only filled while the fastest-time setting is on. Says nothing about who set it.
+    fastest_time_s INTEGER,
     fetched_at    TIMESTAMPTZ NOT NULL
 );
 
@@ -108,6 +110,7 @@ ALTER TABLE segments ADD COLUMN IF NOT EXISTS town TEXT;
 ALTER TABLE segments ADD COLUMN IF NOT EXISTS maximum_grade DOUBLE PRECISION;
 ALTER TABLE segments ADD COLUMN IF NOT EXISTS climb_category INTEGER;
 ALTER TABLE segments ADD COLUMN IF NOT EXISTS elevation_gain_m DOUBLE PRECISION;
+ALTER TABLE segments ADD COLUMN IF NOT EXISTS fastest_time_s INTEGER;
 
 -- Derived from a segment's route, so it's deleted along with the segment.
 CREATE TABLE IF NOT EXISTS segment_wind_models (

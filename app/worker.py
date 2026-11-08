@@ -41,11 +41,13 @@ class Worker:
         client_for: ClientFactory,
         clock: Callable[[], datetime] = _utcnow,
         update_wind: Callable[[psycopg.Connection, datetime], bool] | None = None,
+        fastest_time: bool = False,
     ):
         self._db = db
         self._client_for = client_for
         self._clock = clock
         self._update_wind = update_wind
+        self._fastest_time = fastest_time
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_purge: datetime | None = None
@@ -123,7 +125,14 @@ class Worker:
             )
 
         try:
-            run_sync(conn, self._client_for(athlete_id), athlete_id, self._clock(), progress)
+            run_sync(
+                conn,
+                self._client_for(athlete_id),
+                athlete_id,
+                self._clock(),
+                progress,
+                self._fastest_time,
+            )
         except RateLimited as exc:
             self._finish(conn, job_id, "paused", resume_at=exc.resume_at)
         except AuthExpired:

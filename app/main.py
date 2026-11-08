@@ -14,7 +14,7 @@ from app.db import Database
 from app.lists import (
     DEFAULT_LIST,
     FEET_PER_METER,
-    FIELDS,
+    active_fields,
     LIST_KINDS,
     METERS_PER_MILE,
     FilterError,
@@ -113,6 +113,7 @@ def create_app(
     worker = Worker(
         db,
         client_for,
+        fastest_time=settings.fastest_time,
         update_wind=lambda conn, now: update_next_rider(
             conn, Maps(settings.map_dir), fetch_forecasts, now, settings.pooled_explore
         ),
@@ -171,9 +172,15 @@ def create_app(
             if needs_sync and job is not None and job["status"] == "done":
                 enqueue_sync(conn, athlete_id)
                 job = _latest_job(conn, athlete_id)
-            list_settings = load_list_settings(conn, athlete_id, list)
+            list_settings = load_list_settings(conn, athlete_id, list, settings.fastest_time)
             segments = build_list(
-                conn, athlete_id, list, list_settings, now, pooled=settings.pooled_explore
+                conn,
+                athlete_id,
+                list,
+                list_settings,
+                now,
+                pooled=settings.pooled_explore,
+                fastest_time=settings.fastest_time,
             )
 
         active = job is not None and job["status"] in ACTIVE_STATUSES
@@ -191,9 +198,10 @@ def create_app(
                 "show_lists": lists_ready or (job is not None and job["status"] == "done"),
                 "segments": segments,
                 "list": list,
-                "fields": FIELDS,
+                "fields": active_fields(settings.fastest_time),
+                "fastest_time": settings.fastest_time,
                 "list_settings": list_settings,
-                "filter_boxes": filter_boxes(list_settings.filters),
+                "filter_boxes": filter_boxes(list_settings.filters, settings.fastest_time),
                 "filter_error": request.session.pop("filter_error", None),
                 "wind_pending": pending,
                 "reload_for_wind": reload_for_wind,
@@ -274,9 +282,9 @@ def create_app(
         athlete_id = request.session.get("athlete_id")
         if list not in LIST_KINDS:
             list = DEFAULT_LIST
-        elif athlete_id is not None and can_sort(field):
+        elif athlete_id is not None and can_sort(field, settings.fastest_time):
             with db.connect() as conn:
-                list_settings = load_list_settings(conn, athlete_id, list)
+                list_settings = load_list_settings(conn, athlete_id, list, settings.fastest_time)
                 choose_sort(list_settings, field)
                 save_list_settings(conn, athlete_id, list, list_settings)
         return RedirectResponse(f"/?list={list}", status_code=303)
@@ -291,12 +299,14 @@ def create_app(
             return RedirectResponse(f"/?list={DEFAULT_LIST}", status_code=303)
         if athlete_id is not None:
             try:
-                filters = parse_filter_form({key: str(value) for key, value in form.items()})
+                filters = parse_filter_form(
+                    {key: str(value) for key, value in form.items()}, settings.fastest_time
+                )
             except FilterError as error:
                 request.session["filter_error"] = f"{error} Nothing was changed."
             else:
                 with db.connect() as conn:
-                    list_settings = load_list_settings(conn, athlete_id, list)
+                    list_settings = load_list_settings(conn, athlete_id, list, settings.fastest_time)
                     list_settings.filters = filters
                     save_list_settings(conn, athlete_id, list, list_settings)
         return RedirectResponse(f"/?list={list}", status_code=303)
@@ -309,7 +319,7 @@ def create_app(
             list = DEFAULT_LIST
         elif athlete_id is not None:
             with db.connect() as conn:
-                list_settings = load_list_settings(conn, athlete_id, list)
+                list_settings = load_list_settings(conn, athlete_id, list, settings.fastest_time)
                 list_settings.filters = {}
                 save_list_settings(conn, athlete_id, list, list_settings)
         return RedirectResponse(f"/?list={list}", status_code=303)

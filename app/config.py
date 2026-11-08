@@ -22,6 +22,8 @@ class Settings:
     redirect_uri: str = "http://localhost:8000/auth/callback"
     # Must stay off until webhooks are running.
     pooled_explore: bool = False
+    # Shows the fastest time anyone has recorded on each segment. Off until chosen.
+    fastest_time: bool = False
     map_dir: str = str(Path.home() / ".local/share/gorges-gusts/maps")
 
 
@@ -34,4 +36,5 @@ def load_settings() -> Settings:
         session_secret=os.environ["SESSION_SECRET"],
         token_encryption_key=os.environ["TOKEN_ENCRYPTION_KEY"],
         pooled_explore=os.environ.get("POOLED_EXPLORE", "").lower() == "true",
+        fastest_time=os.environ.get("FASTEST_TIME", "").lower() == "true",
     )
