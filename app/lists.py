@@ -1,6 +1,7 @@
 """The My Segments and Explore lists: which segments each holds, their fields, and sorting."""
 
-from collections.abc import Callable
+import math
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -14,6 +15,8 @@ from app.region import route_in_region
 LIST_KINDS = ("my_segments", "explore")
 DEFAULT_LIST = "my_segments"
 FORECAST_HOURS = 48
+METERS_PER_MILE = 1609.34
+FEET_PER_METER = 3.28084
 
 Direction = Literal["asc", "desc"]
 
@@ -26,12 +29,18 @@ class Field:
     "ticks" (tick boxes) or "search". `first` is the direction of the first click
     on its heading, or None for a field that can't be sorted. `value` reads it from
     a list row, giving None for a blank, which always sorts last.
+
+    For a "number" field, `per_shown_unit` is how many of the row's units make one unit
+    as the list shows it (1609.34 metres to a mile), and `is_time` means entries are typed
+    as minutes and seconds and `value` is in seconds.
     """
 
     label: str
     kind: Literal["number", "ticks", "search"]
     first: Direction | None
     value: Callable[[dict], object]
+    per_shown_unit: float = 1.0
+    is_time: bool = False
 
 
 def _wind(key: str) -> Callable[[dict], float | None]:
@@ -43,11 +52,17 @@ def _wind(key: str) -> Callable[[dict], float | None]:
 FIELDS: dict[str, Field] = {
     "name": Field("Segment", "search", None, lambda row: row["name"]),
     "town": Field("Town", "ticks", None, lambda row: row["town"]),
-    "distance": Field("Distance", "number", "desc", lambda row: row["distance_m"]),
+    "distance": Field(
+        "Distance", "number", "desc", lambda row: row["distance_m"], per_shown_unit=METERS_PER_MILE
+    ),
     "average_grade": Field("Avg grade", "number", "desc", lambda row: row["average_grade"]),
     "steepest_grade": Field("Steepest grade", "number", "desc", lambda row: row["maximum_grade"]),
     "elevation_gain": Field(
-        "Elevation gain", "number", "desc", lambda row: row["elevation_gain_m"]
+        "Elevation gain",
+        "number",
+        "desc",
+        lambda row: row["elevation_gain_m"],
+        per_shown_unit=1 / FEET_PER_METER,
     ),
     # Strava's 0 to 5, so biggest first is hardest first: HC, 1, 2, 3, 4, then none.
     "climb_category": Field(
@@ -57,7 +72,9 @@ FIELDS: dict[str, Field] = {
         "Your attempts, 90 days", "number", "desc", lambda row: row["recent_efforts"]
     ),
     # Seconds, fastest first. Blank for segments the rider hasn't attempted.
-    "recent_best": Field("Recent best", "number", "asc", lambda row: row["recent_best"]),
+    "recent_best": Field(
+        "Recent best", "number", "asc", lambda row: row["recent_best"], is_time=True
+    ),
     # Most negative first: the biggest help from the wind.
     "wind_now": Field("Wind now", "number", "asc", _wind("wind_now")),
     "best_hour": Field("Best hour", "number", "asc", _wind("wind_best")),
@@ -72,7 +89,7 @@ DEFAULT_SORTS = {"my_segments": "your_attempts", "explore": "people_on_strava"}
 
 @dataclass
 class ListSettings:
-    """A rider's choices for one list. `filters` is stored now and used by the filter tickets."""
+    """A rider's choices for one list. `filters` is {field key: filter}, see "Filters" below."""
 
     sort_field: str
     sort_direction: Direction
@@ -98,7 +115,9 @@ def load_list_settings(conn: psycopg.Connection, athlete_id: int, kind: str) -> 
     ).fetchone()
     if row is None:
         return default_settings(kind)
-    settings = ListSettings(row["sort_field"], row["sort_direction"], row["filters"])
+    settings = ListSettings(
+        row["sort_field"], row["sort_direction"], clean_filters(row["filters"])
+    )
     sort = FIELDS.get(settings.sort_field)
     if sort is None or sort.first is None or settings.sort_direction not in ("asc", "desc"):
         default = default_settings(kind)
@@ -120,6 +139,163 @@ def save_list_settings(
         """,
         (athlete_id, kind, settings.sort_field, settings.sort_direction, Jsonb(settings.filters)),
     )
+
+
+# Filters
+#
+# A list's filters are saved as one JSON object, {field key: filter}, with an entry only
+# for fields that are filtered. What a filter looks like depends on the field's kind:
+#   number: {"min": 1.5, "max": 4}  either key may be left out; in the units the list shows
+#           (miles, feet, percent; seconds for a time field, shown and typed as m:ss).
+# Each kind has a FilterKind in FILTER_KINDS saying how to read the form, check a saved
+# value, and test a row. The filter form is one form holding every box, and it replaces the
+# whole set: a field with all its boxes empty is simply not filtered.
+
+
+class FilterError(ValueError):
+    """An entry that can't be used. The message is shown to the rider."""
+
+
+@dataclass(frozen=True)
+class FilterKind:
+    # Reads field `key`'s boxes from the posted form: its filter, or None for unfiltered.
+    parse: Callable[[str, Mapping[str, str]], object | None]
+    # A saved filter if it is well formed, else None (so it is dropped).
+    clean: Callable[[object], object | None]
+    # Whether a row's value passes. Only called on a filtered field.
+    matches: Callable[[object, object, Field], bool]
+    # Text for each box when the form is shown: {box name suffix: text}.
+    show: Callable[[object, Field], dict[str, str]]
+
+
+def parse_time(text: str) -> float:
+    """"m:ss" or "h:mm:ss" as seconds."""
+    parts = text.split(":")
+    if len(parts) not in (2, 3) or not all(part.isdigit() for part in parts):
+        raise ValueError(text)
+    numbers = [int(part) for part in parts]
+    if numbers[-1] > 59 or (len(numbers) == 3 and numbers[1] > 59):
+        raise ValueError(text)
+    total = 0
+    for number in numbers:
+        total = total * 60 + number
+    return float(total)
+
+
+def format_time(seconds: float) -> str:
+    hours, rest = divmod(round(seconds), 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02}:{secs:02}" if hours else f"{minutes}:{secs:02}"
+
+
+def _parse_number(text: str, field_info: Field) -> float | None:
+    text = text.strip().replace("\u2212", "-")  # The minus sign wind numbers are shown with.
+    if not text:
+        return None
+    try:
+        number = parse_time(text) if field_info.is_time else float(text)
+    except ValueError:
+        what = "a time like 1:30" if field_info.is_time else "a number"
+        raise FilterError(f"{field_info.label}: \u201c{text}\u201d isn't {what}.") from None
+    if not math.isfinite(number):
+        raise FilterError(f"{field_info.label}: \u201c{text}\u201d isn't a usable number.")
+    return number
+
+
+def parse_number_filter(key: str, form: Mapping[str, str]) -> dict | None:
+    field_info = FIELDS[key]
+    bounds = {}
+    for edge in ("min", "max"):
+        number = _parse_number(form.get(f"{key}_{edge}", ""), field_info)
+        if number is not None:
+            bounds[edge] = number
+    if "min" in bounds and "max" in bounds and bounds["min"] > bounds["max"]:
+        raise FilterError(f"{field_info.label}: the minimum is above the maximum.")
+    return bounds or None
+
+
+def clean_number_filter(saved: object) -> dict | None:
+    if not isinstance(saved, dict):
+        return None
+    bounds = {}
+    for edge in ("min", "max"):
+        number = saved.get(edge)
+        if isinstance(number, (int, float)) and not isinstance(number, bool):
+            if math.isfinite(number):
+                bounds[edge] = float(number)
+    return bounds or None
+
+
+def number_matches(value: object, bounds: dict, field_info: Field) -> bool:
+    if value is None:
+        return False  # A blank can't be said to be within the limits.
+    shown = round(value / field_info.per_shown_unit, 6)
+    return bounds.get("min", -math.inf) <= shown <= bounds.get("max", math.inf)
+
+
+def show_number_filter(bounds: object, field_info: Field) -> dict[str, str]:
+    def text(edge: str) -> str:
+        number = (bounds or {}).get(edge)
+        if number is None:
+            return ""
+        return format_time(number) if field_info.is_time else f"{number:g}"
+
+    return {"min": text("min"), "max": text("max")}
+
+
+# Add a kind here to make its fields filterable (the ticks and search tickets do).
+FILTER_KINDS: dict[str, FilterKind] = {
+    "number": FilterKind(
+        parse=parse_number_filter,
+        clean=clean_number_filter,
+        matches=number_matches,
+        show=show_number_filter,
+    ),
+}
+
+
+def clean_filters(saved: object) -> dict:
+    """Saved filters without unknown fields or malformed entries."""
+    if not isinstance(saved, dict):
+        return {}
+    cleaned = {}
+    for key, value in saved.items():
+        field_info = FIELDS.get(key)
+        kind = FILTER_KINDS.get(field_info.kind) if field_info else None
+        if kind is not None:
+            kept = kind.clean(value)
+            if kept is not None:
+                cleaned[key] = kept
+    return cleaned
+
+
+def parse_filter_form(form: Mapping[str, str]) -> dict:
+    """The filters a submitted form describes. Raises FilterError on the first bad entry."""
+    filters = {}
+    for key, field_info in FIELDS.items():
+        kind = FILTER_KINDS.get(field_info.kind)
+        parsed = kind.parse(key, form) if kind is not None else None
+        if parsed is not None:
+            filters[key] = parsed
+    return filters
+
+
+def filter_boxes(filters: dict) -> dict[str, dict[str, str]]:
+    """For each filterable field, the text to show in its boxes: {key: {"min": "", ...}}."""
+    return {
+        key: FILTER_KINDS[field_info.kind].show(filters.get(key), field_info)
+        for key, field_info in FIELDS.items()
+        if field_info.kind in FILTER_KINDS
+    }
+
+
+def filter_segments(segments: list[dict], filters: dict) -> list[dict]:
+    """The segments that pass every filter."""
+    for key, saved in filters.items():
+        field_info = FIELDS[key]
+        matches = FILTER_KINDS[field_info.kind].matches
+        segments = [row for row in segments if matches(field_info.value(row), saved, field_info)]
+    return segments
 
 
 def can_sort(field_key: str) -> bool:
@@ -155,7 +331,7 @@ def build_list(
     """A rider's list `kind` with every field filled in and their settings applied."""
     segments = segment_list(conn, athlete_id, kind, now, pooled)
     add_wind(conn, athlete_id, segments, now)
-    return sort_segments(segments, settings)
+    return sort_segments(filter_segments(segments, settings.filters), settings)
 
 
 def has_missing_details(conn: psycopg.Connection, athlete_id: int) -> bool:

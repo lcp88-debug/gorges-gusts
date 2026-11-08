@@ -35,6 +35,21 @@
     {% if list == "explore" and not pooled %}
       <p class="notice">Explore matches My Segments for now: other riders' segments will appear once sharing is turned on.</p>
     {% endif %}
+    {% if filter_error %}<p class="notice error" role="alert">{{ filter_error }}</p>{% endif %}
+    <details class="filters"{% if list_settings.filters or filter_error %} open{% endif %}>
+      <summary>Filters{% if list_settings.filters %} ({{ list_settings.filters | length }} on){% endif %}</summary>
+      <form method="post" action="/filters">
+        <input type="hidden" name="list" value="{{ list }}">
+        {% for key, boxes in filter_boxes.items() %}
+          <div><span>{{ fields[key].label }}</span>
+            <label>Min <input name="{{ key }}_min" value="{{ boxes.min }}" placeholder="{{ 'm:ss' if fields[key].is_time else '' }}"></label>
+            <label>Max <input name="{{ key }}_max" value="{{ boxes.max }}" placeholder="{{ 'm:ss' if fields[key].is_time else '' }}"></label>
+          </div>
+        {% endfor %}
+        <button>Apply filters</button>
+      </form>
+      <form method="post" action="/filters/clear"><input type="hidden" name="list" value="{{ list }}"><button class="quiet">Clear all filters</button></form>
+    </details>
     {% if segments %}
       <div class="table-wrap">
         <table>
@@ -95,6 +110,8 @@
           </tbody>
         </table>
       </div>
+    {% elif list_settings.filters %}
+      <p>No segments match your filters.</p>
     {% elif not active %}
       <p>No segments in this area found in your road rides from the last 90 days.</p>
     {% endif %}
