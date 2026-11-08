@@ -102,6 +102,10 @@ def active_fields(fastest_time: bool = False) -> dict[str, Field]:
 DEFAULT_SORTS = {"my_segments": "your_attempts", "explore": "people_on_strava"}
 
 
+# Strava's climb category 0 to 5 as the list shows it, so a category is its position here.
+CLIMB_CATEGORIES = ("none", "4", "3", "2", "1", "HC")
+
+
 @dataclass
 class ListSettings:
     """A rider's choices for one list. `filters` is {field key: filter}, see "Filters" below."""
@@ -164,6 +168,9 @@ def save_list_settings(
 # for fields that are filtered. What a filter looks like depends on the field's kind:
 #   number: {"min": 1.5, "max": 4}  either key may be left out; in the units the list shows
 #           (miles, feet, percent; seconds for a time field, shown and typed as m:ss).
+#   ticks:  ["Ithaca", "Dryden"] or [0, 4, 5]  the values to keep (towns; Strava's 0 to 5
+#           climb categories, where 0 "none" is a real value). A blank never passes.
+#   search: "gorge"  kept when the segment's name contains it, ignoring capitals.
 # Each kind has a FilterKind in FILTER_KINDS saying how to read the form, check a saved
 # value, and test a row. The filter form is one form holding every box, and it replaces the
 # whole set: a field with all its boxes empty is simply not filtered.
@@ -182,7 +189,8 @@ class FilterKind:
     # Whether a row's value passes. Only called on a filtered field.
     matches: Callable[[object, object, Field], bool]
     # Text for each box when the form is shown: {box name suffix: text}.
-    show: Callable[[object, Field], dict[str, str]]
+    # Ticks show {"ticked": [...]} and search {"text": ...}.
+    show: Callable[[object, Field], dict[str, object]]
 
 
 def parse_time(text: str) -> float:
@@ -260,8 +268,79 @@ def show_number_filter(bounds: object, field_info: Field) -> dict[str, str]:
     return {"min": text("min"), "max": text("max")}
 
 
-# Add a kind here to make its fields filterable (the ticks and search tickets do).
+# Tick boxes are posted as one box per value, named `<key>_<value>` (climb_category_0,
+# town_Ithaca), so a ticked box is any form entry starting with `<key>_`.
+def _ticked_values(key: str, form: Mapping[str, str]) -> list[str]:
+    prefix = f"{key}_"
+    return [name[len(prefix):] for name in form if name.startswith(prefix)]
+
+
+def parse_ticks_filter(key: str, form: Mapping[str, str]) -> list | None:
+    values = _ticked_values(key, form)
+    if key == "climb_category":
+        categories = set()
+        for value in values:
+            if value not in {str(number) for number in range(len(CLIMB_CATEGORIES))}:
+                raise FilterError(f"{FIELDS[key].label}: \u201c{value}\u201d isn't a category.")
+            categories.add(int(value))
+        return sorted(categories) or None
+    return sorted(set(values)) or None
+
+
+def clean_ticks_filter(saved: object) -> list | None:
+    if not isinstance(saved, list):
+        return None
+    kept = [value for value in saved if isinstance(value, (str, int)) and not isinstance(value, bool)]
+    return kept or None
+
+
+def ticks_matches(value: object, saved: list, field_info: Field) -> bool:
+    return value is not None and value in saved
+
+
+def show_ticks_filter(saved: object, field_info: Field) -> dict[str, object]:
+    return {"ticked": [str(value) for value in saved or []]}
+
+
+def parse_search_filter(key: str, form: Mapping[str, str]) -> str | None:
+    return form.get(f"{key}_search", "").strip() or None
+
+
+def clean_search_filter(saved: object) -> str | None:
+    return saved if isinstance(saved, str) and saved.strip() else None
+
+
+def search_matches(value: object, saved: str, field_info: Field) -> bool:
+    return value is not None and saved.strip().lower() in str(value).lower()
+
+
+def show_search_filter(saved: object, field_info: Field) -> dict[str, object]:
+    return {"text": saved or ""}
+
+
+def tick_choices(key: str, rows: list[dict], saved: object) -> list[tuple[str, str]]:
+    """The tick boxes to show for a field: (value, label). Towns are only those in `rows`,
+    plus any still ticked from before so they can be unticked."""
+    if key == "climb_category":
+        return [(str(number), label) for number, label in enumerate(CLIMB_CATEGORIES)]
+    towns = {row[key] for row in rows if row[key]} | {str(value) for value in saved or []}
+    return [(town, town) for town in sorted(towns, key=str.lower)]
+
+
+# Add a kind here to make its fields filterable.
 FILTER_KINDS: dict[str, FilterKind] = {
+    "ticks": FilterKind(
+        parse=parse_ticks_filter,
+        clean=clean_ticks_filter,
+        matches=ticks_matches,
+        show=show_ticks_filter,
+    ),
+    "search": FilterKind(
+        parse=parse_search_filter,
+        clean=clean_search_filter,
+        matches=search_matches,
+        show=show_search_filter,
+    ),
     "number": FilterKind(
         parse=parse_number_filter,
         clean=clean_number_filter,
@@ -298,8 +377,8 @@ def parse_filter_form(form: Mapping[str, str], fastest_time: bool = False) -> di
     return filters
 
 
-def filter_boxes(filters: dict, fastest_time: bool = False) -> dict[str, dict[str, str]]:
-    """For each filterable field, the text to show in its boxes: {key: {"min": "", ...}}."""
+def filter_boxes(filters: dict, fastest_time: bool = False) -> dict[str, dict[str, object]]:
+    """For each filterable field, what to show in its boxes: {key: {"min": "", ...}}."""
     return {
         key: FILTER_KINDS[field_info.kind].show(filters.get(key), field_info)
         for key, field_info in active_fields(fastest_time).items()
@@ -344,6 +423,49 @@ def sort_segments(segments: list[dict], settings: ListSettings) -> list[dict]:
     return sorted(known, key=value, reverse=settings.sort_direction == "desc") + blank
 
 
+# Time range
+#
+# A rider's time range for a list is the stretch of the next 48 hours that best hour is
+# chosen from, as a (start, end) pair of hours, both included. None means all 48 hours.
+# It's kept in the rider's session (see main.py), not with their saved list settings.
+
+TimeRange = tuple[datetime, datetime]
+
+
+class TimeRangeError(ValueError):
+    """A range that can't be used. The message is shown to the rider."""
+
+
+def this_hour(now: datetime) -> datetime:
+    return now.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
+def hour_options(now: datetime) -> list[datetime]:
+    """Every hour a time range can start or end at: this hour and the 48 after it."""
+    start = this_hour(now)
+    return [start + timedelta(hours=offset) for offset in range(FORECAST_HOURS + 1)]
+
+
+def _parse_hour(text: str, what: str) -> datetime:
+    try:
+        moment = datetime.fromisoformat(text.strip())
+    except ValueError:
+        raise TimeRangeError(f"The {what} of the time range isn't a time.") from None
+    # A time with no zone is read as the server's local time, which the page shows hours in.
+    return moment.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
+def parse_time_range(start: str, end: str, now: datetime) -> TimeRange:
+    """The range the form describes. Raises TimeRangeError if it can't be used."""
+    first, last = _parse_hour(start, "start"), _parse_hour(end, "end")
+    options = hour_options(now)
+    if not (options[0] <= first <= options[-1] and options[0] <= last <= options[-1]):
+        raise TimeRangeError("The time range has to be within the next 48 hours.")
+    if last < first:
+        raise TimeRangeError("The time range ends before it starts.")
+    return first, last
+
+
 def build_list(
     conn: psycopg.Connection,
     athlete_id: int,
@@ -352,10 +474,14 @@ def build_list(
     now: datetime,
     pooled: bool = False,
     fastest_time: bool = False,
+    time_range: TimeRange | None = None,
 ) -> list[dict]:
-    """A rider's list `kind` with every field filled in and their settings applied."""
+    """A rider's list `kind` with every field filled in and their settings applied.
+
+    `time_range` limits which hours best hour is chosen from; None means all 48.
+    """
     segments = segment_list(conn, athlete_id, kind, now, pooled)
-    add_wind(conn, athlete_id, segments, now)
+    add_wind(conn, athlete_id, segments, now, time_range)
     return sort_segments(filter_segments(segments, settings.filters, fastest_time), settings)
 
 
@@ -411,10 +537,18 @@ def segment_list(
 
 
 def add_wind(
-    conn: psycopg.Connection, athlete_id: int, segments: list[dict], now: datetime
+    conn: psycopg.Connection,
+    athlete_id: int,
+    segments: list[dict],
+    now: datetime,
+    time_range: TimeRange | None = None,
 ) -> None:
-    """Adds each segment's `wind_now`, `wind_best`, `wind_hours` and `less_certain`."""
-    this_hour = now.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    """Adds each segment's `wind_now`, `wind_best`, `wind_hours` and `less_certain`.
+
+    `wind_now` and `wind_hours` always cover every stored hour; only `wind_best` is limited
+    to the hours inside `time_range`.
+    """
+    start_hour = this_hour(now)
     ids = [segment["id"] for segment in segments]
     hours: dict[int, list[dict]] = {}
     for row in conn.execute(
@@ -423,7 +557,7 @@ def add_wind(
         WHERE athlete_id = %s AND segment_id = ANY(%s) AND hour >= %s AND hour <= %s
         ORDER BY hour
         """,
-        (athlete_id, ids, this_hour, this_hour + timedelta(hours=FORECAST_HOURS)),
+        (athlete_id, ids, start_hour, start_hour + timedelta(hours=FORECAST_HOURS)),
     ):
         hours.setdefault(row["segment_id"], []).append(row)
     less_certain = {
@@ -436,7 +570,10 @@ def add_wind(
     for segment in segments:
         rows = hours.get(segment["id"], [])
         segment["wind_hours"] = rows
-        segment["wind_now"] = next((row for row in rows if row["hour"] == this_hour), None)
+        segment["wind_now"] = next((row for row in rows if row["hour"] == start_hour), None)
+        in_range = rows
+        if time_range is not None:
+            in_range = [row for row in rows if time_range[0] <= row["hour"] <= time_range[1]]
         # min() keeps the earliest of equal hours.
-        segment["wind_best"] = min(rows, key=lambda row: row["percent"], default=None)
+        segment["wind_best"] = min(in_range, key=lambda row: row["percent"], default=None)
         segment["less_certain"] = segment["id"] in less_certain
