@@ -18,13 +18,16 @@ from app.lists import (
     LIST_KINDS,
     METERS_PER_MILE,
     FilterError,
+    TimeRangeError,
     build_list,
     can_sort,
     choose_sort,
     filter_boxes,
     has_missing_details,
+    hour_options,
     load_list_settings,
     parse_filter_form,
+    parse_time_range,
     save_list_settings,
 )
 from app.maps import Maps
@@ -32,7 +35,7 @@ from app.strava import REQUIRED_SCOPE, AuthExpired, RateLimiter, StravaClient, S
 from app.tokens import TokenStore
 from app.weather import fetch_forecasts
 from app.wind import DEFAULT_POWER_20MIN_W, DEFAULT_WEIGHT_KG
-from app.wind_updates import update_next_rider, wind_pending
+from app.wind_updates import SEEN_RECENTLY, update_next_rider, wind_pending
 from app.worker import Worker, enqueue_sync
 
 # Strava's climb_category, 0 to 5, as riders know it.
@@ -97,6 +100,15 @@ def _in_range(text: str, limits: tuple[int, int]) -> float | None:
     return value
 
 
+def saved_time_range(request: Request, list: str):
+    """The list's time range kept in the rider's session, or None for all 48 hours."""
+    try:
+        first, last = request.session.get("time_ranges", {})[list]
+        return datetime.fromisoformat(first), datetime.fromisoformat(last)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def create_app(
     settings: Settings | None = None,
     start_worker: bool = True,
@@ -150,6 +162,14 @@ def create_app(
 
         now = datetime.now(timezone.utc)
         with db.connect() as conn:
+            # Read before it's updated: the time range resets after more than an hour away.
+            before = conn.execute(
+                "SELECT last_seen_at FROM athletes WHERE id = %s", (athlete_id,)
+            ).fetchone()
+            if before is None or before["last_seen_at"] is None or (
+                now - before["last_seen_at"] >= SEEN_RECENTLY
+            ):
+                request.session.pop("time_ranges", None)
             athlete = conn.execute(
                 """
                 UPDATE athletes SET last_seen_at = %s WHERE id = %s
@@ -172,8 +192,15 @@ def create_app(
                 enqueue_sync(conn, athlete_id)
                 job = _latest_job(conn, athlete_id)
             list_settings = load_list_settings(conn, athlete_id, list)
+            time_range = saved_time_range(request, list)
             segments = build_list(
-                conn, athlete_id, list, list_settings, now, pooled=settings.pooled_explore
+                conn,
+                athlete_id,
+                list,
+                list_settings,
+                now,
+                pooled=settings.pooled_explore,
+                time_range=time_range,
             )
 
         active = job is not None and job["status"] in ACTIVE_STATUSES
@@ -195,6 +222,9 @@ def create_app(
                 "list_settings": list_settings,
                 "filter_boxes": filter_boxes(list_settings.filters),
                 "filter_error": request.session.pop("filter_error", None),
+                "time_range": time_range,
+                "hour_options": hour_options(now),
+                "range_error": request.session.pop("range_error", None),
                 "wind_pending": pending,
                 "reload_for_wind": reload_for_wind,
                 "athlete": athlete,
@@ -312,6 +342,36 @@ def create_app(
                 list_settings = load_list_settings(conn, athlete_id, list)
                 list_settings.filters = {}
                 save_list_settings(conn, athlete_id, list, list_settings)
+        return RedirectResponse(f"/?list={list}", status_code=303)
+
+    @app.post("/timerange")
+    def set_time_range(
+        request: Request, list: str = Form(DEFAULT_LIST), start: str = Form(""), end: str = Form("")
+    ):
+        """The time range form: keeps the range for this visit, or changes nothing if it's bad."""
+        athlete_id = request.session.get("athlete_id")
+        if list not in LIST_KINDS:
+            list = DEFAULT_LIST
+        elif athlete_id is not None:
+            try:
+                first, last = parse_time_range(start, end, datetime.now(timezone.utc))
+            except TimeRangeError as error:
+                request.session["range_error"] = f"{error} Nothing was changed."
+            else:
+                ranges = dict(request.session.get("time_ranges", {}))
+                ranges[list] = [first.isoformat(), last.isoformat()]
+                request.session["time_ranges"] = ranges
+        return RedirectResponse(f"/?list={list}", status_code=303)
+
+    @app.post("/timerange/clear")
+    def clear_time_range(request: Request, list: str = Form(DEFAULT_LIST)):
+        """Back to all 48 hours for this list."""
+        if list not in LIST_KINDS:
+            list = DEFAULT_LIST
+        else:
+            ranges = dict(request.session.get("time_ranges", {}))
+            ranges.pop(list, None)
+            request.session["time_ranges"] = ranges
         return RedirectResponse(f"/?list={list}", status_code=303)
 
     @app.post("/profile")
