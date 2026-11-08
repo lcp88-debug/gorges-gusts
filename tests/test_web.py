@@ -39,17 +39,17 @@ def pooled_client(pooled_app):
         yield test_client
 
 
-def token_response():
+def token_response(athlete_id=ATHLETE_ID):
     return {
         "access_token": ACCESS,
         "refresh_token": REFRESH,
         "expires_at": int(time.time()) + 3600,
-        "athlete": {"id": ATHLETE_ID},
+        "athlete": {"id": athlete_id},
     }
 
 
-def log_in(client, scope="read,activity:read_all"):
-    responses.post(f"{OAUTH_URL}/token", json=token_response())
+def log_in(client, scope="read,activity:read_all", athlete_id=ATHLETE_ID):
+    responses.post(f"{OAUTH_URL}/token", json=token_response(athlete_id))
     login = client.get("/login")
     state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
     return client.get("/auth/callback", params={"state": state, "code": "abc", "scope": scope})
@@ -243,18 +243,6 @@ def test_explore_note_is_gone_once_pooling_is_on(pooled_app, pooled_client):
     pooled_app.state.worker.run_next_job()
 
     assert NOTE not in pooled_client.get("/?list=explore").text
-
-
-@responses.activate
-def test_old_tab_links_open_my_segments(app, client):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-
-    for old in ("attempted", "popular"):
-        page = client.get(f"/?sort={old}").text
-        assert segment_order(page) == ["Often &lt;Climb&gt;", "Popular Road"]
-        assert 'aria-current="page">My Segments' in page
 
 
 @responses.activate
@@ -539,24 +527,6 @@ def test_less_certain_numbers_are_marked(app, client, db):
     add_wind_numbers(db, 500, [3.0], less_certain=True)
 
     assert 'title="Less certain' in client.get("/").text
-
-
-@responses.activate
-def test_clicking_a_wind_heading_sorts_the_current_list(app, client, db):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-    add_wind_numbers(db, 500, [5.0, 4.0])
-    add_wind_numbers(db, 600, [-2.0, 9.0])
-
-    assert segment_order(client.get("/?list=my_segments").text) == ["Often &lt;Climb&gt;", "Popular Road"]
-    page = client.get("/?list=my_segments&by=now").text
-    assert segment_order(page) == ["Popular Road", "Often &lt;Climb&gt;"]
-    assert 'href="/?list=my_segments&amp;by=best"' in page
-    assert segment_order(client.get("/?list=my_segments&by=nonsense").text) == [
-        "Often &lt;Climb&gt;",
-        "Popular Road",
-    ]
 
 
 @responses.activate

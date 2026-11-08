@@ -26,27 +26,7 @@ def test_builds_unique_segments_with_90_day_counts(conn, fake):
     assert fake.calls.count("segment:10") == 1
 
 
-def test_two_lists_use_their_own_sort_order(conn, fake):
-    fake.add_ride(1, [10, 10, 20])
-    fake.add_segment(10, "Often ridden", athletes=5)
-    fake.add_segment(20, "Popular", athletes=900)
-
-    run_sync(conn, fake, ATHLETE, NOW)
-
-    assert names(conn, "my_segments") == ["Often ridden", "Popular"]
-    assert names(conn, "explore") == ["Popular", "Often ridden"]
-
-
-def test_ties_sort_by_name_and_missing_counts_sort_last(conn, fake):
-    fake.add_ride(1, [10, 20, 30])
-    fake.add_segment(10, "bravo", athletes=5)
-    fake.add_segment(20, "Alpha", athletes=5)
-    fake.add_segment(30, "Charlie", athletes=None)
-
-    run_sync(conn, fake, ATHLETE, NOW)
-
-    assert names(conn, "my_segments") == ["Alpha", "bravo", "Charlie"]
-    assert names(conn, "explore") == ["Alpha", "bravo", "Charlie"]
+# Sorting is tested on the page, in tests/test_list_sort.py.
 
 
 @pytest.mark.parametrize(
@@ -342,7 +322,7 @@ def test_explore_mixes_in_contributors_segments_with_zero_attempts(conn, fake):
 
     rows = pooled_rows(conn)
 
-    assert [(r["name"], r["recent_efforts"]) for r in rows] == [("Their climb", 0), ("My road", 1)]
+    assert sorted((r["name"], r["recent_efforts"]) for r in rows) == [("My road", 1), ("Their climb", 0)]
 
 
 def test_contributors_attempts_are_not_counted_as_mine(conn, fake):

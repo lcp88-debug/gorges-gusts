@@ -13,12 +13,14 @@ from app.config import CACHE_TTL, Settings, load_settings
 from app.db import Database
 from app.lists import (
     DEFAULT_LIST,
-    LIST_ORDERS,
-    WIND_SORTS,
-    add_wind,
+    FIELDS,
+    LIST_KINDS,
+    build_list,
+    can_sort,
+    choose_sort,
     has_missing_details,
-    segment_list,
-    sort_by_wind,
+    load_list_settings,
+    save_list_settings,
 )
 from app.maps import Maps
 from app.strava import REQUIRED_SCOPE, AuthExpired, RateLimiter, StravaClient, StravaOAuth
@@ -109,7 +111,7 @@ def create_app(
     app.state.worker = worker
 
     @app.get("/", response_class=HTMLResponse)
-    def home(request: Request, list: str = DEFAULT_LIST, by: str = ""):
+    def home(request: Request, list: str = DEFAULT_LIST):
         athlete_id = request.session.get("athlete_id")
         if athlete_id is None:
             return templates.TemplateResponse(
@@ -120,7 +122,7 @@ def create_app(
                     "pooled": settings.pooled_explore,
                 },
             )
-        if list not in LIST_ORDERS:
+        if list not in LIST_KINDS:
             list = DEFAULT_LIST
 
         now = datetime.now(timezone.utc)
@@ -146,13 +148,10 @@ def create_app(
             if needs_sync and job is not None and job["status"] == "done":
                 enqueue_sync(conn, athlete_id)
                 job = _latest_job(conn, athlete_id)
-            segments = segment_list(
-                conn, athlete_id, list, now, pooled=settings.pooled_explore
+            list_settings = load_list_settings(conn, athlete_id, list)
+            segments = build_list(
+                conn, athlete_id, list, list_settings, now, pooled=settings.pooled_explore
             )
-            add_wind(conn, athlete_id, segments, now)
-        by = by if by in WIND_SORTS else ""
-        if by:
-            segments = sort_by_wind(segments, by)
 
         active = job is not None and job["status"] in ACTIVE_STATUSES
         # Without a worker running, nothing is going to change.
@@ -169,7 +168,8 @@ def create_app(
                 "show_lists": lists_ready or (job is not None and job["status"] == "done"),
                 "segments": segments,
                 "list": list,
-                "by": by,
+                "fields": FIELDS,
+                "list_settings": list_settings,
                 "wind_pending": pending,
                 "reload_for_wind": reload_for_wind,
                 "athlete": athlete,
@@ -242,6 +242,19 @@ def create_app(
                     (choice == "on", athlete_id),
                 )
         return RedirectResponse("/", status_code=303)
+
+    @app.post("/sort")
+    def sort(request: Request, list: str = Form(DEFAULT_LIST), field: str = Form("")):
+        """A click on a field's heading. Anything unknown changes nothing."""
+        athlete_id = request.session.get("athlete_id")
+        if list not in LIST_KINDS:
+            list = DEFAULT_LIST
+        elif athlete_id is not None and can_sort(field):
+            with db.connect() as conn:
+                list_settings = load_list_settings(conn, athlete_id, list)
+                choose_sort(list_settings, field)
+                save_list_settings(conn, athlete_id, list, list_settings)
+        return RedirectResponse(f"/?list={list}", status_code=303)
 
     @app.post("/profile")
     def save_profile(request: Request, weight_kg: str = Form(""), power_20min_w: str = Form("")):

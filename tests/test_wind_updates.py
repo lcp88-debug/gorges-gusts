@@ -6,7 +6,7 @@ from datetime import timedelta
 import pytest
 
 from app.db import purge_expired
-from app.lists import add_wind, sort_by_wind
+from app.lists import add_wind
 from app.region import in_region
 from app.main import _hour, _wind_percent, templates
 from app.weather import WeatherUnavailable, grid_point
@@ -281,11 +281,6 @@ class TestListValues:
         assert first["wind_best"]["hour"] == THIS_HOUR
         assert second["wind_best"]["hour"] == THIS_HOUR + timedelta(hours=1)
         assert missing["wind_now"] is None and missing["wind_best"] is None
-
-    def test_sorts_biggest_saving_first_with_missing_last(self, conn):
-        rows = self.setup_rows(conn)
-        assert [row["id"] for row in sort_by_wind(rows, "best")] == [2, 1, 3]
-        assert [row["id"] for row in sort_by_wind(rows, "now")] == [2, 1, 3]
 
     def test_other_riders_numbers_are_not_mixed_in(self, conn):
         self.setup_rows(conn)
