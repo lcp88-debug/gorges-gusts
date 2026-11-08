@@ -399,6 +399,49 @@ def sort_segments(segments: list[dict], settings: ListSettings) -> list[dict]:
     return sorted(known, key=value, reverse=settings.sort_direction == "desc") + blank
 
 
+# Time range
+#
+# A rider's time range for a list is the stretch of the next 48 hours that best hour is
+# chosen from, as a (start, end) pair of hours, both included. None means all 48 hours.
+# It's kept in the rider's session (see main.py), not with their saved list settings.
+
+TimeRange = tuple[datetime, datetime]
+
+
+class TimeRangeError(ValueError):
+    """A range that can't be used. The message is shown to the rider."""
+
+
+def this_hour(now: datetime) -> datetime:
+    return now.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
+def hour_options(now: datetime) -> list[datetime]:
+    """Every hour a time range can start or end at: this hour and the 48 after it."""
+    start = this_hour(now)
+    return [start + timedelta(hours=offset) for offset in range(FORECAST_HOURS + 1)]
+
+
+def _parse_hour(text: str, what: str) -> datetime:
+    try:
+        moment = datetime.fromisoformat(text.strip())
+    except ValueError:
+        raise TimeRangeError(f"The {what} of the time range isn't a time.") from None
+    # A time with no zone is read as the server's local time, which the page shows hours in.
+    return moment.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
+def parse_time_range(start: str, end: str, now: datetime) -> TimeRange:
+    """The range the form describes. Raises TimeRangeError if it can't be used."""
+    first, last = _parse_hour(start, "start"), _parse_hour(end, "end")
+    options = hour_options(now)
+    if not (options[0] <= first <= options[-1] and options[0] <= last <= options[-1]):
+        raise TimeRangeError("The time range has to be within the next 48 hours.")
+    if last < first:
+        raise TimeRangeError("The time range ends before it starts.")
+    return first, last
+
+
 def build_list(
     conn: psycopg.Connection,
     athlete_id: int,
@@ -406,10 +449,14 @@ def build_list(
     settings: ListSettings,
     now: datetime,
     pooled: bool = False,
+    time_range: TimeRange | None = None,
 ) -> list[dict]:
-    """A rider's list `kind` with every field filled in and their settings applied."""
+    """A rider's list `kind` with every field filled in and their settings applied.
+
+    `time_range` limits which hours best hour is chosen from; None means all 48.
+    """
     segments = segment_list(conn, athlete_id, kind, now, pooled)
-    add_wind(conn, athlete_id, segments, now)
+    add_wind(conn, athlete_id, segments, now, time_range)
     return sort_segments(filter_segments(segments, settings.filters), settings)
 
 
@@ -465,10 +512,18 @@ def segment_list(
 
 
 def add_wind(
-    conn: psycopg.Connection, athlete_id: int, segments: list[dict], now: datetime
+    conn: psycopg.Connection,
+    athlete_id: int,
+    segments: list[dict],
+    now: datetime,
+    time_range: TimeRange | None = None,
 ) -> None:
-    """Adds each segment's `wind_now`, `wind_best`, `wind_hours` and `less_certain`."""
-    this_hour = now.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    """Adds each segment's `wind_now`, `wind_best`, `wind_hours` and `less_certain`.
+
+    `wind_now` and `wind_hours` always cover every stored hour; only `wind_best` is limited
+    to the hours inside `time_range`.
+    """
+    start_hour = this_hour(now)
     ids = [segment["id"] for segment in segments]
     hours: dict[int, list[dict]] = {}
     for row in conn.execute(
@@ -477,7 +532,7 @@ def add_wind(
         WHERE athlete_id = %s AND segment_id = ANY(%s) AND hour >= %s AND hour <= %s
         ORDER BY hour
         """,
-        (athlete_id, ids, this_hour, this_hour + timedelta(hours=FORECAST_HOURS)),
+        (athlete_id, ids, start_hour, start_hour + timedelta(hours=FORECAST_HOURS)),
     ):
         hours.setdefault(row["segment_id"], []).append(row)
     less_certain = {
@@ -490,7 +545,10 @@ def add_wind(
     for segment in segments:
         rows = hours.get(segment["id"], [])
         segment["wind_hours"] = rows
-        segment["wind_now"] = next((row for row in rows if row["hour"] == this_hour), None)
+        segment["wind_now"] = next((row for row in rows if row["hour"] == start_hour), None)
+        in_range = rows
+        if time_range is not None:
+            in_range = [row for row in rows if time_range[0] <= row["hour"] <= time_range[1]]
         # min() keeps the earliest of equal hours.
-        segment["wind_best"] = min(rows, key=lambda row: row["percent"], default=None)
+        segment["wind_best"] = min(in_range, key=lambda row: row["percent"], default=None)
         segment["less_certain"] = segment["id"] in less_certain
