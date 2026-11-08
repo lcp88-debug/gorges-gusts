@@ -41,9 +41,14 @@
           <thead>
             <tr>
               <th scope="col">{{ fields.name.label }}</th>
+              <th scope="col">{{ fields.town.label }}</th>
               {{ sort_heading("distance") }}
               {{ sort_heading("average_grade") }}
+              {{ sort_heading("steepest_grade") }}
+              {{ sort_heading("elevation_gain") }}
+              {{ sort_heading("climb_category") }}
               {{ sort_heading("your_attempts") }}
+              {{ sort_heading("recent_best") }}
               {{ sort_heading("wind_now") }}
               {{ sort_heading("best_hour") }}
               <th scope="col">Next 48 hours</th>
@@ -56,9 +61,14 @@
             {% for segment in segments %}
               <tr>
                 <td>{{ segment.name }}</td>
+                <td>{{ segment.town | blank }}</td>
                 <td>{{ segment.distance_m | miles }}</td>
                 <td>{{ segment.average_grade | percent }}</td>
+                <td>{{ segment.maximum_grade | percent }}</td>
+                <td>{{ segment.elevation_gain_m | feet }}</td>
+                <td>{{ segment.climb_category | climb_category }}</td>
                 <td>{{ segment.recent_efforts | count }}</td>
+                <td>{{ segment.recent_best | duration }}</td>
                 <td>{{ wind_cell(segment.wind_now, not segment.less_certain) }}</td>
                 <td>{{ wind_cell(segment.wind_best, not segment.less_certain) }}{% if segment.wind_best %}<br><span class="muted">{{ segment.wind_best.hour | hour }}</span>{% endif %}</td>
                 <td>

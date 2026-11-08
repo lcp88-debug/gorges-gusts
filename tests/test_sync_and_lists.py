@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -197,6 +197,115 @@ def test_old_per_rider_segment_table_is_replaced_on_startup(db):
         }
     assert "athlete_id" not in columns
     assert "all_time_efforts" not in columns
+
+
+def test_new_segment_details_and_attempt_times_are_stored(conn, fake):
+    fake.add_ride(1, [10])
+    fake.details[1]["segment_efforts"][0]["elapsed_time"] = 229
+    fake.add_segment(
+        10,
+        "Hill",
+        city="Ithaca",
+        maximum_grade=12.5,
+        climb_category=3,
+        total_elevation_gain=95.4,
+    )
+
+    run_sync(conn, fake, ATHLETE, NOW)
+
+    [row] = segment_list(conn, ATHLETE, "my_segments", NOW)
+    assert (row["town"], row["maximum_grade"], row["climb_category"], row["elevation_gain_m"]) == (
+        "Ithaca",
+        12.5,
+        3,
+        95.4,
+    )
+    assert row["recent_best"] == 229
+    assert fake.calls == ["list", "activity:1", "segment:10"]
+
+
+def test_missing_new_details_are_stored_as_blank(conn, fake):
+    fake.add_ride(1, [10])
+    fake.add_segment(10, "Bare")
+
+    run_sync(conn, fake, ATHLETE, NOW)
+
+    [row] = segment_list(conn, ATHLETE, "my_segments", NOW)
+    assert [row[key] for key in ("town", "maximum_grade", "climb_category", "elevation_gain_m")] == [
+        None,
+        None,
+        None,
+        None,
+    ]
+    assert row["recent_best"] is None
+
+
+def test_recent_best_is_my_fastest_attempt_in_the_last_90_days(conn, fake):
+    fake.add_ride(1, [10, 10], when="2026-10-20T10:00:00Z")
+    fake.add_ride(2, [10], when="2026-08-01T10:00:00Z")  # Past 90 days by the list time below.
+    for effort, seconds in zip(fake.details[1]["segment_efforts"], [300, 250]):
+        effort["elapsed_time"] = seconds
+    fake.details[2]["segment_efforts"][0]["elapsed_time"] = 100
+    fake.add_segment(10, "Hill")
+    run_sync(conn, fake, ATHLETE, datetime(2026, 10, 25, tzinfo=timezone.utc))
+
+    rows = segment_list(conn, ATHLETE, "my_segments", NOW)
+
+    assert [row["recent_best"] for row in rows] == [250]
+
+
+def test_recent_best_ignores_other_riders_attempts(conn, fake):
+    conn.execute("UPDATE athletes SET contributes = TRUE")
+    fake.add_ride(1, [10])
+    fake.details[1]["segment_efforts"][0]["elapsed_time"] = 300
+    fake.add_segment(10, "Shared")
+    run_sync(conn, fake, ATHLETE, NOW)
+    fake.activities.clear()
+    fake.add_ride(2, [10, 20])
+    for effort in fake.details[2]["segment_efforts"]:
+        effort["elapsed_time"] = 100
+    fake.add_segment(20, "Only theirs")
+    run_sync(conn, fake, OTHER_ATHLETE, NOW)
+
+    rows = segment_list(conn, ATHLETE, "explore", NOW, pooled=True)
+
+    assert [(row["name"], row["recent_best"]) for row in rows] == [
+        ("Only theirs", None),
+        ("Shared", 300),
+    ]
+
+
+def count(conn, table):
+    return conn.execute(f"SELECT count(*) AS n FROM {table}").fetchone()["n"]
+
+
+def test_cache_without_the_new_fields_is_cleared_once_on_startup(db, conn, fake):
+    fake.add_ride(1, [10])
+    fake.add_segment(10, "Old cache")
+    run_sync(conn, fake, ATHLETE, NOW)
+    conn.execute("UPDATE athletes SET last_synced_at = now(), wind_stale = FALSE")
+    conn.execute("INSERT INTO list_settings VALUES (%s, 'explore', 'distance', 'asc', '{}')", (ATHLETE,))
+    # How the tables looked before these fields existed.
+    conn.execute("ALTER TABLE efforts DROP COLUMN elapsed_s")
+    for column in ("town", "maximum_grade", "climb_category", "elevation_gain_m"):
+        conn.execute(f"ALTER TABLE segments DROP COLUMN {column}")
+
+    db.init_schema()
+
+    for table in ("rides", "efforts", "segments"):
+        assert count(conn, table) == 0
+    athlete = conn.execute(
+        "SELECT last_synced_at, wind_stale FROM athletes WHERE id = %s", (ATHLETE,)
+    ).fetchone()
+    assert athlete == {"last_synced_at": None, "wind_stale": True}
+    assert count(conn, "list_settings") == 1
+
+    # The next sync fetches everything again, and a later startup keeps it.
+    fake.details[1]["segment_efforts"][0]["elapsed_time"] = 200
+    run_sync(conn, fake, ATHLETE, NOW)
+    db.init_schema()
+
+    assert [row["recent_best"] for row in segment_list(conn, ATHLETE, "my_segments", NOW)] == [200]
 
 
 def test_polyline_is_stored(conn, fake):

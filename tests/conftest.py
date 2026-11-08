@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 
 import pytest
 from cryptography.fernet import Fernet
@@ -104,6 +105,50 @@ class FakeStrava:
             "athlete_segment_stats": {"effort_count": mine},
             **overrides,
         }
+
+
+class _Table(HTMLParser):
+    """Reads the list's headings and the text of each row's own cells, skipping hour views."""
+
+    def __init__(self):
+        super().__init__()
+        self.headings: list[str] = []
+        self.rows: list[list[str]] = []
+        self.row: list[str] = []
+        self.depth = 0
+        self.cell: str | None = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self.depth += 1
+        elif self.depth == 1 and tag == "tr":
+            self.row = []
+        elif self.depth == 1 and tag in ("th", "td"):
+            self.cell = ""
+
+    def handle_endtag(self, tag):
+        if tag == "table":
+            self.depth -= 1
+        elif self.depth == 1 and tag in ("th", "td"):
+            self.row.append(" ".join(self.cell.split()))
+            self.cell = None
+        elif self.depth == 1 and tag == "tr":
+            if self.headings:
+                self.rows.append(self.row)
+            else:
+                self.headings = self.row
+
+    def handle_data(self, data):
+        if self.depth == 1 and self.cell is not None:
+            self.cell += data
+
+
+def table(html):
+    """Each row as {heading: cell text}, in page order. Sort arrows are left out."""
+    parser = _Table()
+    parser.feed(html)
+    headings = [heading.rstrip(" ↑↓") for heading in parser.headings]
+    return [dict(zip(headings, row)) for row in parser.rows]
 
 
 @pytest.fixture

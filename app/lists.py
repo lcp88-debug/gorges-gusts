@@ -42,11 +42,22 @@ def _wind(key: str) -> Callable[[dict], float | None]:
 # a saved key that's no longer here is ignored.
 FIELDS: dict[str, Field] = {
     "name": Field("Segment", "search", None, lambda row: row["name"]),
+    "town": Field("Town", "ticks", None, lambda row: row["town"]),
     "distance": Field("Distance", "number", "desc", lambda row: row["distance_m"]),
     "average_grade": Field("Avg grade", "number", "desc", lambda row: row["average_grade"]),
+    "steepest_grade": Field("Steepest grade", "number", "desc", lambda row: row["maximum_grade"]),
+    "elevation_gain": Field(
+        "Elevation gain", "number", "desc", lambda row: row["elevation_gain_m"]
+    ),
+    # Strava's 0 to 5, so biggest first is hardest first: HC, 1, 2, 3, 4, then none.
+    "climb_category": Field(
+        "Climb category", "ticks", "desc", lambda row: row["climb_category"]
+    ),
     "your_attempts": Field(
         "Your attempts, 90 days", "number", "desc", lambda row: row["recent_efforts"]
     ),
+    # Seconds, fastest first. Blank for segments the rider hasn't attempted.
+    "recent_best": Field("Recent best", "number", "asc", lambda row: row["recent_best"]),
     # Most negative first: the biggest help from the wind.
     "wind_now": Field("Wind now", "number", "asc", _wind("wind_now")),
     "best_hour": Field("Best hour", "number", "asc", _wind("wind_best")),
@@ -173,8 +184,10 @@ def segment_list(
     """
     rows = conn.execute(
         """
-        SELECT s.polyline, s.id, s.name, s.distance_m, s.average_grade, s.athlete_count, s.effort_count,
-               COUNT(e.id) FILTER (WHERE e.athlete_id = %(athlete_id)s) AS recent_efforts
+        SELECT s.polyline, s.id, s.name, s.town, s.distance_m, s.average_grade, s.maximum_grade,
+               s.elevation_gain_m, s.climb_category, s.athlete_count, s.effort_count,
+               COUNT(e.id) FILTER (WHERE e.athlete_id = %(athlete_id)s) AS recent_efforts,
+               MIN(e.elapsed_s) FILTER (WHERE e.athlete_id = %(athlete_id)s) AS recent_best
         FROM segments s
         JOIN efforts e ON e.segment_id = s.id
         JOIN athletes a ON a.id = e.athlete_id

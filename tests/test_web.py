@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.strava import API_URL, OAUTH_URL
-from tests.conftest import LOCAL_ROUTE, OUTSIDE_ROUTE
+from tests.conftest import LOCAL_ROUTE, OUTSIDE_ROUTE, table
 
 ATHLETE_ID = 1001
 ACCESS = "made-up-access-token"
@@ -84,6 +84,7 @@ def mock_strava():
                 {
                     "id": 12,
                     "start_date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "elapsed_time": 3723,
                     "segment": {"id": 500, "private": False},
                 },
                 {
@@ -105,6 +106,10 @@ def mock_strava():
             "map": {"polyline": LOCAL_ROUTE},
             "athlete_count": 12,
             "effort_count": 3456,
+            "city": "Ithaca",
+            "maximum_grade": 11.04,
+            "climb_category": 5,
+            "total_elevation_gain": 152.4,
             "athlete_segment_stats": {"effort_count": 7},
         },
     )
@@ -197,7 +202,18 @@ def test_rows_show_the_agreed_details(app, client):
 
     page = client.get("/").text
 
-    for expected in ("2.0 mi", "5.2%", "3,456", "View on Strava", "https://www.strava.com/segments/500"):
+    for expected in (
+        "2.0 mi",
+        "5.2%",
+        "3,456",
+        "<td>Ithaca</td>",
+        "<td>11.0%</td>",
+        "<td>500 ft</td>",
+        "<td>HC</td>",
+        "<td>1:02:03</td>",
+        "View on Strava",
+        "https://www.strava.com/segments/500",
+    ):
         assert expected in page
     assert "all time" not in page
 
@@ -538,7 +554,8 @@ def test_missing_wind_shows_a_dash_and_no_hours(app, client):
     page = client.get("/").text
 
     assert "<summary>Hours</summary>" not in page
-    assert page.count("<td>–</td>") == 4
+    for row in table(page):
+        assert [row["Wind now"], row["Best hour"], row["Next 48 hours"]] == ["–", "–", "–"]
 
 
 @responses.activate

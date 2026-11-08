@@ -2,6 +2,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 
 import psycopg
+from psycopg import sql
 
 from app.config import RIDE_WINDOW
 from app.db import delete_unused_segments
@@ -112,10 +113,12 @@ def _save_ride(conn: psycopg.Connection, athlete_id: int, activity: dict, now: d
             conn.execute(
                 """
                 INSERT INTO efforts (
-                    id, athlete_id, ride_id, segment_id, start_date, shareable, fetched_at
+                    id, athlete_id, ride_id, segment_id, start_date, elapsed_s, shareable,
+                    fetched_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET
+                    elapsed_s = EXCLUDED.elapsed_s,
                     shareable = EXCLUDED.shareable,
                     fetched_at = EXCLUDED.fetched_at
                 """,
@@ -125,36 +128,49 @@ def _save_ride(conn: psycopg.Connection, athlete_id: int, activity: dict, now: d
                     activity["id"],
                     effort["segment"]["id"],
                     _parse_time(effort["start_date"]),
+                    effort.get("elapsed_time"),
                     effort.get("visibility") == "everyone",
                     now,
                 ),
             )
 
 
+def segment_details(segment: dict) -> dict:
+    """The segment details we keep from Strava's segment reply, keyed by column name.
+
+    A missing value is stored as blank.
+    """
+    return {
+        "id": segment["id"],
+        "name": segment["name"],
+        "distance_m": segment.get("distance"),
+        "average_grade": segment.get("average_grade"),
+        "polyline": (segment.get("map") or {}).get("polyline"),
+        "athlete_count": segment.get("athlete_count"),
+        "effort_count": segment.get("effort_count"),
+        "town": segment.get("city") or None,
+        "maximum_grade": segment.get("maximum_grade"),
+        "climb_category": segment.get("climb_category"),
+        "elevation_gain_m": segment.get("total_elevation_gain"),
+    }
+
+
 def _save_segment(conn: psycopg.Connection, segment: dict, now: datetime) -> None:
+    details = {**segment_details(segment), "fetched_at": now}
+    columns = sql.SQL(", ").join(map(sql.Identifier, details))
+    updates = sql.SQL(", ").join(
+        sql.SQL("{0} = EXCLUDED.{0}").format(sql.Identifier(column))
+        for column in details
+        if column != "id"
+    )
     conn.execute(
-        """
-        INSERT INTO segments (
-            id, name, distance_m, average_grade, polyline, athlete_count, effort_count, fetched_at
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (id) DO UPDATE SET
-            name = EXCLUDED.name,
-            distance_m = EXCLUDED.distance_m,
-            average_grade = EXCLUDED.average_grade,
-            polyline = EXCLUDED.polyline,
-            athlete_count = EXCLUDED.athlete_count,
-            effort_count = EXCLUDED.effort_count,
-            fetched_at = EXCLUDED.fetched_at
-        """,
-        (
-            segment["id"],
-            segment["name"],
-            segment.get("distance"),
-            segment.get("average_grade"),
-            (segment.get("map") or {}).get("polyline"),
-            segment.get("athlete_count"),
-            segment.get("effort_count"),
-            now,
+        sql.SQL(
+            "INSERT INTO segments ({columns}) VALUES ({values}) "
+            "ON CONFLICT (id) DO UPDATE SET {updates}"
+        ).format(
+            columns=columns,
+            values=sql.SQL(", ").join(sql.Placeholder() * len(details)),
+            updates=updates,
         ),
+        list(details.values()),
     )
