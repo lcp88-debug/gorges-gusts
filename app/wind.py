@@ -8,6 +8,8 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+import numpy as np
+
 EARTH_RADIUS_M = 6_371_000
 GRAVITY = 9.81
 GAS_CONSTANT_DRY_AIR = 287.05
@@ -201,68 +203,116 @@ def effort_power(profile: RiderProfile, duration_s: float) -> float:
     return sustainable + ANAEROBIC_WORK_J / max(duration_s, SHORTEST_EFFORT_S)
 
 
+def _resistance(grade: np.ndarray, mass: float) -> np.ndarray:
+    """The force from gravity and rolling resistance on each step."""
+    slope = np.arctan(grade)
+    return mass * GRAVITY * (np.sin(slope) + ROLLING_RESISTANCE * np.cos(slope))
+
+
 def _power_needed(
-    speed: float, headwind: float, crosswind: float, grade: float, mass: float, density: float
-) -> float:
+    speed: np.ndarray,
+    headwind: np.ndarray,
+    crosswind: np.ndarray,
+    resistance: np.ndarray,
+    density: np.ndarray,
+) -> np.ndarray:
     along = speed + headwind
-    apparent = math.hypot(along, crosswind)
+    apparent = np.hypot(along, crosswind)
     drag = 0.5 * density * CDA * apparent * along
-    slope = math.atan(grade)
-    resistance = mass * GRAVITY * (math.sin(slope) + ROLLING_RESISTANCE * math.cos(slope))
     return (drag + resistance) * speed / DRIVETRAIN_EFFICIENCY
 
 
 def _solve_speed(
-    power: float, headwind: float, crosswind: float, grade: float, mass: float, density: float
-) -> float:
-    """The speed where the power needed equals `power`, capped at MAX_SPEED_MS."""
-    if _power_needed(MAX_SPEED_MS, headwind, crosswind, grade, mass, density) <= power:
-        return MAX_SPEED_MS
-    low, high = 0.0, MAX_SPEED_MS
+    power: float,
+    headwind: np.ndarray,
+    crosswind: np.ndarray,
+    resistance: np.ndarray,
+    density: np.ndarray,
+) -> np.ndarray:
+    """The speed on each step where the power needed equals `power`, capped at MAX_SPEED_MS.
+
+    Every step is solved at once, by halving the range of possible speeds 32 times.
+    """
+    low = np.zeros(np.broadcast_shapes(headwind.shape, resistance.shape))
+    high = np.full_like(low, MAX_SPEED_MS)
     for _ in range(32):
         middle = (low + high) / 2
-        if _power_needed(middle, headwind, crosswind, grade, mass, density) < power:
-            low = middle
-        else:
-            high = middle
-    return high
+        too_slow = _power_needed(middle, headwind, crosswind, resistance, density) < power
+        low = np.where(too_slow, middle, low)
+        high = np.where(too_slow, high, middle)
+    fastest = np.full_like(low, MAX_SPEED_MS)
+    flat_out = _power_needed(fastest, headwind, crosswind, resistance, density)
+    return np.where(flat_out <= power, MAX_SPEED_MS, high)
 
 
 def _wind_at(wind: Wind | Callable[[Step], Wind]) -> Callable[[Step], Wind]:
     return wind if callable(wind) else lambda step: wind
 
 
-def _time_s(
+def _times_s(
     steps: Sequence[Step],
     power: float,
     mass: float,
-    wind_at: Callable[[Step], Wind],
+    winds: Sequence[Callable[[Step], Wind]],
     shelter: ShelterFactor | None,
-) -> float:
-    """Time over the steps. Without `shelter` the air is still, at the forecast's density."""
-    total = 0.0
-    for step in steps:
-        wind = wind_at(step)
-        headwind = crosswind = 0.0
-        if shelter is not None:
-            at_rider = wind.speed_ms * shelter(step, wind.from_degrees)
-            angle = math.radians(wind.from_degrees - step.bearing)
-            headwind = at_rider * math.cos(angle)
-            crosswind = at_rider * math.sin(angle)
-        speed = _solve_speed(power, headwind, crosswind, step.grade, mass, wind.air_density)
-        total += step.length_m / speed
-    return total
+) -> np.ndarray:
+    """Time over the steps in each of `winds`. Without `shelter` the air is still, at each
+    forecast's density."""
+    lengths = np.array([step.length_m for step in steps])
+    resistance = _resistance(np.array([step.grade for step in steps]), mass)
+    bearings = np.array([step.bearing for step in steps])
+    forecast = [[wind_at(step) for step in steps] for wind_at in winds]
+    density = np.array([[wind.air_density for wind in row] for row in forecast])
+    headwind = crosswind = np.zeros_like(density)
+    if shelter is not None:
+        at_rider = np.array(
+            [
+                [wind.speed_ms * shelter(step, wind.from_degrees) for step, wind in zip(steps, row)]
+                for row in forecast
+            ]
+        )
+        angle = np.radians(np.array([[wind.from_degrees for wind in row] for row in forecast]) - bearings)
+        headwind = at_rider * np.cos(angle)
+        crosswind = at_rider * np.sin(angle)
+    speed = _solve_speed(power, headwind, crosswind, resistance, density)
+    return (lengths / speed).sum(axis=1)
 
 
 def segment_power(steps: Sequence[Step], profile: RiderProfile) -> float:
     """The power the rider would hold for this segment with no wind."""
     mass = profile.weight_kg + BIKE_KG
-    standard_air = lambda step: Wind(0.0, 0.0)  # noqa: E731
+    standard_air = [lambda step: Wind(0.0, 0.0)]
     # A rider's power depends on how long the effort lasts, which depends on their power.
     power = profile.power_20min_w
     for _ in range(8):
-        power = effort_power(profile, _time_s(steps, power, mass, standard_air, None))
+        power = effort_power(profile, float(_times_s(steps, power, mass, standard_air, None)[0]))
     return power
+
+
+def wind_effects(
+    steps: Sequence[Step],
+    profile: RiderProfile,
+    winds: Sequence[Wind | Callable[[Step], Wind]],
+    shelter: ShelterFactor,
+    power: float | None = None,
+) -> list[WindEffect]:
+    """`wind_effect` for many forecasts at once, such as every hour of a forecast.
+
+    Much faster than one at a time, because all the hours are worked out together.
+    """
+    if not winds:
+        return []
+    mass = profile.weight_kg + BIKE_KG
+    winds_at = [_wind_at(wind) for wind in winds]
+    if power is None:
+        power = segment_power(steps, profile)
+    still = _times_s(steps, power, mass, winds_at, None)
+    windy = _times_s(steps, power, mass, winds_at, shelter)
+    steep_descent = has_steep_descent(steps)
+    return [
+        WindEffect(percent=float((windy_s / still_s - 1) * 100), steep_descent=steep_descent)
+        for still_s, windy_s in zip(still, windy)
+    ]
 
 
 def wind_effect(
@@ -275,18 +325,10 @@ def wind_effect(
     """The % change in the rider's time at the power they'd hold with no wind.
 
     `wind` can be one forecast or a function giving each step its own. Pass `power` from
-    `segment_power` when working out many hours for the same segment.
+    `segment_power` when working out many hours for the same segment, or use
+    `wind_effects` to work them all out at once.
     """
-    mass = profile.weight_kg + BIKE_KG
-    wind_at = _wind_at(wind)
-    if power is None:
-        power = segment_power(steps, profile)
-    still = _time_s(steps, power, mass, wind_at, None)
-    windy = _time_s(steps, power, mass, wind_at, shelter)
-    return WindEffect(
-        percent=(windy / still - 1) * 100,
-        steep_descent=has_steep_descent(steps),
-    )
+    return wind_effects(steps, profile, [wind], shelter, power)[0]
 
 
 def has_steep_descent(steps: Sequence[Step]) -> bool:

@@ -23,7 +23,7 @@ from app.wind import (
     decode_polyline,
     has_steep_descent,
     segment_power,
-    wind_effect,
+    wind_effects,
 )
 
 log = logging.getLogger(__name__)
@@ -151,15 +151,20 @@ def _save_effects(
     shelter = shelter_factor(table)
     power = segment_power(steps, profile)
     middle = steps[len(steps) // 2]
+    hours = sorted(hours)
+    effects = wind_effects(
+        steps,
+        profile,
+        [lambda step, hour=hour: forecasts[points[step]][hour] for hour in hours],
+        shelter,
+        power,
+    )
     with conn.transaction():
         conn.execute(
             "DELETE FROM wind_effects WHERE athlete_id = %s AND segment_id = %s",
             (athlete_id, segment_id),
         )
-        for hour in sorted(hours):
-            effect = wind_effect(
-                steps, profile, lambda step: forecasts[points[step]][hour], shelter, power
-            )
+        for hour, effect in zip(hours, effects):
             shown = forecasts[points[middle]][hour]
             conn.execute(
                 """
@@ -181,6 +186,10 @@ def wind_pending(row: dict, now: datetime) -> bool:
     """Whether a rider's wind effects are about to change, from their `athletes` row."""
     started, updated = row["wind_started_at"], row["wind_updated_at"]
     if row["wind_stale"] or updated is None:
+        return True
+    # After time away, the stored hours have all passed, and an update is due as soon as
+    # they're seen again.
+    if now - updated >= UPDATE_INTERVAL:
         return True
     return started is not None and started > updated and now - started < STUCK_AFTER
 

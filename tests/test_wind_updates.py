@@ -305,6 +305,10 @@ class TestWindPending:
         assert wind_pending(self.row(stale=True), NOW)
         assert wind_pending(self.row(started=None, updated=None), NOW)
 
+    def test_overdue_after_time_away(self):
+        assert not wind_pending(self.row(), NOW + timedelta(minutes=59))
+        assert wind_pending(self.row(), NOW + timedelta(days=2))
+
     def test_running(self):
         started = NOW + timedelta(minutes=1)
         assert wind_pending(self.row(started=started), started)

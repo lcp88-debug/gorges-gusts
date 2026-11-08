@@ -13,6 +13,7 @@ from app.wind import (
     decode_polyline,
     effort_power,
     wind_effect,
+    wind_effects,
 )
 
 FULL_WIND = lambda step, wind_from: 1.0  # noqa: E731
@@ -152,6 +153,14 @@ class TestWindEffect:
         calm = wind_effect(steps, RIDER, Wind(5, 0), lambda step, wind_from: 0.0).percent
         assert 0 == pytest.approx(calm)
         assert 0 < woods < open_road
+
+    def test_many_hours_at_once_match_one_at_a_time(self):
+        steps = road(1500, 30, 0.03)
+        hours = [Wind(3, 0), Wind(8, 200, 25, 990), Wind(0, 0), Wind(14, 95, -5, 1030)]
+        together = wind_effects(steps, RIDER, hours, FULL_WIND)
+        apart = [wind_effect(steps, RIDER, wind, FULL_WIND) for wind in hours]
+        assert [e.percent for e in together] == pytest.approx([e.percent for e in apart])
+        assert wind_effects(steps, RIDER, [], FULL_WIND) == []
 
     def test_each_step_can_have_its_own_wind(self):
         steps = road(1000, 0, 0.0)
