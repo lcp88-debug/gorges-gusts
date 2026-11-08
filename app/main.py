@@ -12,8 +12,8 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.config import CACHE_TTL, Settings, load_settings
 from app.db import Database
 from app.lists import (
-    DEFAULT_SORT,
-    SORT_ORDERS,
+    DEFAULT_LIST,
+    LIST_ORDERS,
     WIND_SORTS,
     add_wind,
     has_missing_details,
@@ -89,7 +89,7 @@ def create_app(
         db,
         client_for,
         update_wind=lambda conn, now: update_next_rider(
-            conn, Maps(settings.map_dir), fetch_forecasts, now, settings.pooled_most_popular
+            conn, Maps(settings.map_dir), fetch_forecasts, now, settings.pooled_explore
         ),
     )
 
@@ -109,7 +109,7 @@ def create_app(
     app.state.worker = worker
 
     @app.get("/", response_class=HTMLResponse)
-    def home(request: Request, sort: str = DEFAULT_SORT, by: str = ""):
+    def home(request: Request, list: str = DEFAULT_LIST, by: str = ""):
         athlete_id = request.session.get("athlete_id")
         if athlete_id is None:
             return templates.TemplateResponse(
@@ -117,11 +117,11 @@ def create_app(
                 "login.html",
                 {
                     "error": request.session.pop("login_error", None),
-                    "pooled": settings.pooled_most_popular,
+                    "pooled": settings.pooled_explore,
                 },
             )
-        if sort not in SORT_ORDERS:
-            sort = DEFAULT_SORT
+        if list not in LIST_ORDERS:
+            list = DEFAULT_LIST
 
         now = datetime.now(timezone.utc)
         with db.connect() as conn:
@@ -147,7 +147,7 @@ def create_app(
                 enqueue_sync(conn, athlete_id)
                 job = _latest_job(conn, athlete_id)
             segments = segment_list(
-                conn, athlete_id, sort, now, pooled=settings.pooled_most_popular
+                conn, athlete_id, list, now, pooled=settings.pooled_explore
             )
             add_wind(conn, athlete_id, segments, now)
         by = by if by in WIND_SORTS else ""
@@ -168,7 +168,7 @@ def create_app(
                 "active": active,
                 "show_lists": lists_ready or (job is not None and job["status"] == "done"),
                 "segments": segments,
-                "sort": sort,
+                "list": list,
                 "by": by,
                 "wind_pending": pending,
                 "reload_for_wind": reload_for_wind,
@@ -178,7 +178,7 @@ def create_app(
                 "weight_range": WEIGHT_RANGE_KG,
                 "power_range": POWER_RANGE_W,
                 "profile_error": request.session.pop("profile_error", None),
-                "pooled": settings.pooled_most_popular,
+                "pooled": settings.pooled_explore,
                 "contributes": athlete["contributes"],
             },
         )
@@ -214,7 +214,7 @@ def create_app(
         athlete_id = tokens["athlete"]["id"]
         token_store.save_new_athlete(athlete_id, tokens, scope)
         with db.connect() as conn:
-            if settings.pooled_most_popular:
+            if settings.pooled_explore:
                 # They've just seen the notice. An earlier opt-out is left alone.
                 conn.execute(
                     "UPDATE athletes SET contributes = TRUE WHERE id = %s AND contributes IS NULL",

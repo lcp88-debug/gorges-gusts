@@ -9,7 +9,7 @@ from app.sync import run_sync
 from tests.conftest import ATHLETE, LOCAL_ROUTE, NOW, OTHER_ATHLETE, OUTSIDE_ROUTE, encode_route
 
 
-def names(conn, sort="attempted", athlete=ATHLETE, now=NOW):
+def names(conn, sort="my_segments", athlete=ATHLETE, now=NOW):
     return [row["name"] for row in segment_list(conn, athlete, sort, now)]
 
 
@@ -21,7 +21,7 @@ def test_builds_unique_segments_with_90_day_counts(conn, fake):
 
     run_sync(conn, fake, ATHLETE, NOW)
 
-    rows = segment_list(conn, ATHLETE, "attempted", NOW)
+    rows = segment_list(conn, ATHLETE, "my_segments", NOW)
     assert [(r["name"], r["recent_efforts"]) for r in rows] == [("Climb", 3), ("Flat", 1)]
     assert fake.calls.count("segment:10") == 1
 
@@ -33,8 +33,8 @@ def test_two_lists_use_their_own_sort_order(conn, fake):
 
     run_sync(conn, fake, ATHLETE, NOW)
 
-    assert names(conn, "attempted") == ["Often ridden", "Popular"]
-    assert names(conn, "popular") == ["Popular", "Often ridden"]
+    assert names(conn, "my_segments") == ["Often ridden", "Popular"]
+    assert names(conn, "explore") == ["Popular", "Often ridden"]
 
 
 def test_ties_sort_by_name_and_missing_counts_sort_last(conn, fake):
@@ -45,8 +45,8 @@ def test_ties_sort_by_name_and_missing_counts_sort_last(conn, fake):
 
     run_sync(conn, fake, ATHLETE, NOW)
 
-    assert names(conn, "attempted") == ["Alpha", "bravo", "Charlie"]
-    assert names(conn, "popular") == ["Alpha", "bravo", "Charlie"]
+    assert names(conn, "my_segments") == ["Alpha", "bravo", "Charlie"]
+    assert names(conn, "explore") == ["Alpha", "bravo", "Charlie"]
 
 
 @pytest.mark.parametrize(
@@ -176,8 +176,8 @@ def test_second_rider_reuses_segment_details_without_a_request(conn, fake):
     run_sync(conn, fake, OTHER_ATHLETE, NOW)
 
     assert "segment:10" not in fake.calls
-    mine = segment_list(conn, ATHLETE, "attempted", NOW)
-    theirs = segment_list(conn, OTHER_ATHLETE, "attempted", NOW)
+    mine = segment_list(conn, ATHLETE, "my_segments", NOW)
+    theirs = segment_list(conn, OTHER_ATHLETE, "my_segments", NOW)
     assert [(r["name"], r["recent_efforts"]) for r in mine] == [("Shared", 1)]
     assert [(r["name"], r["recent_efforts"]) for r in theirs] == [("Shared", 2)]
 
@@ -187,7 +187,7 @@ def test_all_time_counts_are_gone_from_the_list(conn, fake):
     fake.add_segment(10, "Climb", mine=40)
     run_sync(conn, fake, ATHLETE, NOW)
 
-    assert "all_time_efforts" not in segment_list(conn, ATHLETE, "attempted", NOW)[0]
+    assert "all_time_efforts" not in segment_list(conn, ATHLETE, "my_segments", NOW)[0]
 
 
 def test_old_per_rider_segment_table_is_replaced_on_startup(db):
@@ -315,7 +315,7 @@ def test_details_table_does_not_record_who_fetched_them(conn, fake):
     assert not {"athlete_id", "all_time_efforts"} & set(row)
 
 
-# Most Popular with other riders' segments
+# Explore with other riders' segments
 
 
 def contribute(conn, athlete=OTHER_ATHLETE, contributes=True):
@@ -329,11 +329,11 @@ def sync_contributor_ride(conn, fake, segment_id=20, name="Their climb", **ride)
     run_sync(conn, fake, OTHER_ATHLETE, NOW)
 
 
-def pooled_rows(conn, athlete=ATHLETE, sort="popular", now=NOW):
+def pooled_rows(conn, athlete=ATHLETE, sort="explore", now=NOW):
     return segment_list(conn, athlete, sort, now, pooled=True)
 
 
-def test_most_popular_mixes_in_contributors_segments_with_zero_attempts(conn, fake):
+def test_explore_mixes_in_contributors_segments_with_zero_attempts(conn, fake):
     fake.add_ride(1, [10])
     fake.add_segment(10, "My road", athletes=5)
     run_sync(conn, fake, ATHLETE, NOW)
@@ -355,11 +355,11 @@ def test_contributors_attempts_are_not_counted_as_mine(conn, fake):
     assert [r["recent_efforts"] for r in pooled_rows(conn)] == [1]
 
 
-def test_most_attempted_stays_limited_to_my_own_segments(conn, fake):
+def test_my_segments_stays_limited_to_my_own_segments(conn, fake):
     contribute(conn)
     sync_contributor_ride(conn, fake)
 
-    assert pooled_rows(conn, sort="attempted") == []
+    assert pooled_rows(conn, sort="my_segments") == []
 
 
 def test_list_rows_name_no_other_rider(conn, fake):
@@ -372,11 +372,11 @@ def test_list_rows_name_no_other_rider(conn, fake):
     assert OTHER_ATHLETE not in row.values()
 
 
-def test_most_popular_is_my_own_segments_when_pooling_is_off(conn, fake):
+def test_explore_is_my_own_segments_when_pooling_is_off(conn, fake):
     contribute(conn)
     sync_contributor_ride(conn, fake)
 
-    assert segment_list(conn, ATHLETE, "popular", NOW) == []
+    assert segment_list(conn, ATHLETE, "explore", NOW) == []
 
 
 def test_opting_out_removes_segments_from_other_riders_lists(conn, fake):
@@ -465,7 +465,7 @@ def test_list_leaves_out_segments_not_fully_inside_the_region(conn, fake, route)
     fake.add_segment(20, "Elsewhere", map={"polyline": route})
     run_sync(conn, fake, ATHLETE, NOW)
 
-    for sort in ("attempted", "popular"):
+    for sort in ("my_segments", "explore"):
         rows = segment_list(conn, ATHLETE, sort, NOW)
         assert [row["name"] for row in rows] == ["Local"]
         assert "polyline" not in rows[0]
@@ -481,6 +481,6 @@ def test_pooled_list_leaves_out_other_riders_segments_elsewhere(conn, fake):
     fake.add_segment(20, "Elsewhere", map={"polyline": OUTSIDE_ROUTE})
     run_sync(conn, fake, OTHER_ATHLETE, NOW)
 
-    rows = segment_list(conn, ATHLETE, "popular", NOW, pooled=True)
+    rows = segment_list(conn, ATHLETE, "explore", NOW, pooled=True)
 
     assert [row["name"] for row in rows] == ["Local"]

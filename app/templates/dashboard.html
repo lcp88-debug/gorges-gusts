@@ -27,10 +27,13 @@
   {% endif %}
 
   {% if show_lists %}
-    <nav class="tabs" aria-label="Sort order">
-      <a href="/?sort=attempted"{% if sort == "attempted" %} aria-current="page"{% endif %}>Most attempted</a>
-      <a href="/?sort=popular"{% if sort == "popular" %} aria-current="page"{% endif %}>Most popular</a>
+    <nav class="tabs" aria-label="Lists">
+      <a href="/?list=my_segments"{% if list == "my_segments" %} aria-current="page"{% endif %}>My Segments</a>
+      <a href="/?list=explore"{% if list == "explore" %} aria-current="page"{% endif %}>Explore</a>
     </nav>
+    {% if list == "explore" and not pooled %}
+      <p class="notice">Explore matches My Segments for now: other riders' segments will appear once sharing is turned on.</p>
+    {% endif %}
     {% if segments %}
       <div class="table-wrap">
         <table>
@@ -40,8 +43,8 @@
               <th scope="col">Distance</th>
               <th scope="col">Avg grade</th>
               <th scope="col">Your efforts, 90 days</th>
-              <th scope="col"><a href="/?sort={{ sort }}&amp;by=now"{% if by == "now" %} aria-current="true"{% endif %}>Now</a></th>
-              <th scope="col"><a href="/?sort={{ sort }}&amp;by=best"{% if by == "best" %} aria-current="true"{% endif %}>Best</a></th>
+              <th scope="col"><a href="/?list={{ list }}&amp;by=now"{% if by == "now" %} aria-current="true"{% endif %}>Now</a></th>
+              <th scope="col"><a href="/?list={{ list }}&amp;by=best"{% if by == "best" %} aria-current="true"{% endif %}>Best</a></th>
               <th scope="col">Next 48 hours</th>
               <th scope="col">Athletes</th>
               <th scope="col">Total efforts</th>
@@ -114,7 +117,7 @@
   {% if pooled %}
     <form class="muted" method="post" action="/contributing/{{ 'off' if contributes else 'on' }}">
       {% if contributes %}
-        Segments from your rides that are visible to everyone can appear on other riders' Most popular lists, without your name.
+        Segments from your rides that are visible to everyone can appear on other riders' Explore lists, without your name.
         <button class="quiet">Turn this off</button>
       {% else %}
         Segments from your rides don't appear on other riders' lists.
