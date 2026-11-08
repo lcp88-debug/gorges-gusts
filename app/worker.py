@@ -40,10 +40,12 @@ class Worker:
         db: Database,
         client_for: ClientFactory,
         clock: Callable[[], datetime] = _utcnow,
+        update_wind: Callable[[psycopg.Connection, datetime], bool] | None = None,
     ):
         self._db = db
         self._client_for = client_for
         self._clock = clock
+        self._update_wind = update_wind
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_purge: datetime | None = None
@@ -62,7 +64,7 @@ class Worker:
         while not self._stop.is_set():
             try:
                 self.purge_if_due()
-                if not self.run_next_job():
+                if not self.run_next_job() and not self.run_wind_update():
                     self._stop.wait(POLL_SECONDS)
             except Exception:
                 log.exception("Sync worker loop error")
@@ -83,6 +85,13 @@ class Worker:
         with self._db.connect() as conn:
             purge_expired(conn, now)
         self._last_purge = now
+
+    def run_wind_update(self) -> bool:
+        """Update one rider's wind effects, if any are due. Returns False if none are."""
+        if self._update_wind is None:
+            return False
+        with self._db.connect() as conn:
+            return self._update_wind(conn, self._clock())
 
     def run_next_job(self) -> bool:
         """Run the next job that's ready. Returns False if none is."""
@@ -129,7 +138,7 @@ class Worker:
             with conn.transaction():
                 self._finish(conn, job_id, "done")
                 conn.execute(
-                    "UPDATE athletes SET last_synced_at = %s WHERE id = %s",
+                    "UPDATE athletes SET last_synced_at = %s, wind_stale = TRUE WHERE id = %s",
                     (self._clock(), athlete_id),
                 )
 

@@ -1,6 +1,7 @@
 import os
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -21,6 +22,7 @@ class Settings:
     redirect_uri: str = "http://localhost:8000/auth/callback"
     # Must stay off until webhooks are running.
     pooled_most_popular: bool = False
+    map_dir: str = str(Path.home() / ".local/share/gorges-gusts/maps")
 
 
 def load_settings() -> Settings:

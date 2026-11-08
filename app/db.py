@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import psycopg
@@ -46,4 +46,9 @@ def purge_expired(conn: psycopg.Connection, now: datetime) -> None:
         )
         conn.execute("DELETE FROM rides WHERE fetched_at < %s", (cutoff,))
         conn.execute("DELETE FROM segments WHERE fetched_at < %s", (cutoff,))
+        last_hour = now - timedelta(hours=1)
+        conn.execute("DELETE FROM wind_effects WHERE hour < %s", (last_hour,))
+        conn.execute(
+            "DELETE FROM forecasts WHERE hour < %s OR fetched_at < %s", (last_hour, cutoff)
+        )
         delete_unused_segments(conn)

@@ -21,10 +21,10 @@ A rider whose attempted segments can appear on other riders' Most Popular lists.
 _Avoid_: Sharer, participant
 
 **Most Attempted**:
-A list of a rider's own segments from their last 90 days of rides, ranked by how many times they attempted each one.
+A list of a rider's own segments from their last 90 days of rides. It can be ranked by how many times they attempted each one, or by wind effect.
 
 **Most Popular**:
-A list of a rider's own segments and those attempted by recently active contributors, ranked together by how many people have ridden each one on Strava.
+A list of a rider's own segments and those attempted by recently active contributors. It can be ranked by how many people have ridden each one on Strava, or by wind effect.
 _Avoid_: Wider list, global list
 
 **Wind effect**:
@@ -42,3 +42,7 @@ _Avoid_: Best window, best time
 **Less certain**:
 A mark on a wind effect from steep terrain or a steep descent, where the estimate is more likely to be well off.
 _Avoid_: Low confidence
+
+**Region**:
+The area around Tompkins County, NY, that the app covers. A segment with any part of its route outside it doesn't appear on any list.
+_Avoid_: Service area, coverage

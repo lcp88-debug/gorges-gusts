@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+from app.region import OutsideRegion, in_region
 from app.wind import Wind
 
 API_URL = "https://api.open-meteo.com/v1/forecast"
@@ -40,6 +41,9 @@ def fetch_forecasts(
     Hours the service has incomplete data for are left out, so they show as "–".
     """
     unique = sorted(set(points))
+    # Rounding to the grid can move a point just past the edge of the region.
+    if not all(in_region(lat, lng, padding=GRID_DEGREES) for lat, lng in unique):
+        raise OutsideRegion("Forecast requested outside the region")
     forecasts: dict[GridPoint, dict[datetime, Wind]] = {}
     for start in range(0, len(unique), POINTS_PER_REQUEST):
         batch = unique[start : start + POINTS_PER_REQUEST]

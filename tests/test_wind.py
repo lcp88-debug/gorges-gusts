@@ -13,6 +13,7 @@ from app.wind import (
     decode_polyline,
     effort_power,
     wind_effect,
+    wind_effects,
 )
 
 FULL_WIND = lambda step, wind_from: 1.0  # noqa: E731
@@ -92,6 +93,10 @@ class TestBuildSteps:
         steps = build_steps(line_north(2000), 0.05, elevation)
         assert sum(step.grade for step in steps) / len(steps) == pytest.approx(0.05)
 
+    def test_gaps_in_the_map_use_the_average_grade(self):
+        steps = build_steps(line_north(500), 0.05, lambda lat, lng: None)
+        assert {step.grade for step in steps} == {0.05}
+
     def test_smoothing_keeps_direction_accurate_on_a_wobbly_route(self):
         random.seed(1)
         wobble = 3 / METERS_PER_DEGREE_LAT
@@ -148,6 +153,20 @@ class TestWindEffect:
         calm = wind_effect(steps, RIDER, Wind(5, 0), lambda step, wind_from: 0.0).percent
         assert 0 == pytest.approx(calm)
         assert 0 < woods < open_road
+
+    def test_many_hours_at_once_match_one_at_a_time(self):
+        steps = road(1500, 30, 0.03)
+        hours = [Wind(3, 0), Wind(8, 200, 25, 990), Wind(0, 0), Wind(14, 95, -5, 1030)]
+        together = wind_effects(steps, RIDER, hours, FULL_WIND)
+        apart = [wind_effect(steps, RIDER, wind, FULL_WIND) for wind in hours]
+        assert [e.percent for e in together] == pytest.approx([e.percent for e in apart])
+        assert wind_effects(steps, RIDER, [], FULL_WIND) == []
+
+    def test_each_step_can_have_its_own_wind(self):
+        steps = road(1000, 0, 0.0)
+        one = wind_effect(steps, RIDER, Wind(5, 0), FULL_WIND).percent
+        same = wind_effect(steps, RIDER, lambda step: Wind(5, 0), FULL_WIND).percent
+        assert same == pytest.approx(one)
 
     def test_shelter_receives_the_wind_direction(self):
         seen = []

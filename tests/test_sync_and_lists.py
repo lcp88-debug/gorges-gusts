@@ -6,7 +6,7 @@ from app.db import purge_expired
 from app.lists import segment_list
 from app.strava import NotFound, RateLimited
 from app.sync import run_sync
-from tests.conftest import ATHLETE, NOW, OTHER_ATHLETE
+from tests.conftest import ATHLETE, LOCAL_ROUTE, NOW, OTHER_ATHLETE, OUTSIDE_ROUTE, encode_route
 
 
 def names(conn, sort="attempted", athlete=ATHLETE, now=NOW):
@@ -192,7 +192,7 @@ def test_all_time_counts_are_gone_from_the_list(conn, fake):
 
 def test_old_per_rider_segment_table_is_replaced_on_startup(db):
     with db.connect() as conn:
-        conn.execute("DROP TABLE segments")
+        conn.execute("DROP TABLE wind_effects, segment_wind_models, segments")
         conn.execute(
             """
             CREATE TABLE segments (
@@ -225,7 +225,7 @@ def test_polyline_is_stored(conn, fake):
     run_sync(conn, fake, ATHLETE, NOW)
 
     row = conn.execute("SELECT polyline FROM segments WHERE id = 10").fetchone()
-    assert row["polyline"] == "poly10"
+    assert row["polyline"] == LOCAL_ROUTE
 
 
 def test_purge_removes_only_data_past_the_cache_limit(conn, fake):
@@ -447,3 +447,40 @@ def test_contributor_drops_out_when_their_cached_rides_expire(conn, fake):
     purge_expired(conn, NOW + timedelta(days=6, minutes=1))
 
     assert pooled_rows(conn, now=NOW + timedelta(days=6, minutes=1)) == []
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        OUTSIDE_ROUTE,
+        encode_route([(42.94, -76.5), (42.96, -76.5)]),
+        None,
+        "",
+        "_p~iF",
+    ],
+)
+def test_list_leaves_out_segments_not_fully_inside_the_region(conn, fake, route):
+    fake.add_ride(1, [10, 20])
+    fake.add_segment(10, "Local")
+    fake.add_segment(20, "Elsewhere", map={"polyline": route})
+    run_sync(conn, fake, ATHLETE, NOW)
+
+    for sort in ("attempted", "popular"):
+        rows = segment_list(conn, ATHLETE, sort, NOW)
+        assert [row["name"] for row in rows] == ["Local"]
+        assert "polyline" not in rows[0]
+
+
+def test_pooled_list_leaves_out_other_riders_segments_elsewhere(conn, fake):
+    conn.execute("UPDATE athletes SET contributes = TRUE")
+    fake.add_ride(1, [10])
+    fake.add_segment(10, "Local")
+    run_sync(conn, fake, ATHLETE, NOW)
+    fake.activities.clear()
+    fake.add_ride(2, [20])
+    fake.add_segment(20, "Elsewhere", map={"polyline": OUTSIDE_ROUTE})
+    run_sync(conn, fake, OTHER_ATHLETE, NOW)
+
+    rows = segment_list(conn, ATHLETE, "popular", NOW, pooled=True)
+
+    assert [row["name"] for row in rows] == ["Local"]

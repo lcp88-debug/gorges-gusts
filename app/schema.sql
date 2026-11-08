@@ -10,6 +10,15 @@ CREATE TABLE IF NOT EXISTS athletes (
 -- NULL until the athlete has connected with the contributing notice on screen.
 ALTER TABLE athletes ADD COLUMN IF NOT EXISTS contributes BOOLEAN;
 
+-- A rider's own entries, not Strava data. NULL means they haven't entered one.
+ALTER TABLE athletes ADD COLUMN IF NOT EXISTS weight_kg DOUBLE PRECISION;
+ALTER TABLE athletes ADD COLUMN IF NOT EXISTS power_20min_w DOUBLE PRECISION;
+-- When to work out wind effects: only for riders using the app.
+ALTER TABLE athletes ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
+ALTER TABLE athletes ADD COLUMN IF NOT EXISTS wind_stale BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE athletes ADD COLUMN IF NOT EXISTS wind_started_at TIMESTAMPTZ;
+ALTER TABLE athletes ADD COLUMN IF NOT EXISTS wind_updated_at TIMESTAMPTZ;
+
 -- Strava data: every row carries fetched_at and is purged after CACHE_TTL.
 CREATE TABLE IF NOT EXISTS rides (
     id         BIGINT PRIMARY KEY,
@@ -40,6 +49,8 @@ BEGIN
         SELECT 1 FROM information_schema.columns
         WHERE table_schema = current_schema() AND table_name = 'segments' AND column_name = 'athlete_id'
     ) THEN
+        DROP TABLE IF EXISTS wind_effects;
+        DROP TABLE IF EXISTS segment_wind_models;
         DROP TABLE segments;
     END IF;
 END $$;
@@ -54,6 +65,38 @@ CREATE TABLE IF NOT EXISTS segments (
     athlete_count BIGINT,
     effort_count  BIGINT,
     fetched_at    TIMESTAMPTZ NOT NULL
+);
+
+-- Derived from a segment's route, so it's deleted along with the segment.
+CREATE TABLE IF NOT EXISTS segment_wind_models (
+    segment_id   BIGINT PRIMARY KEY REFERENCES segments (id) ON DELETE CASCADE,
+    steps        JSONB NOT NULL,
+    less_certain BOOLEAN NOT NULL
+);
+
+-- Also deleted along with the segment, or the rider.
+CREATE TABLE IF NOT EXISTS wind_effects (
+    athlete_id   BIGINT NOT NULL REFERENCES athletes (id) ON DELETE CASCADE,
+    segment_id   BIGINT NOT NULL REFERENCES segments (id) ON DELETE CASCADE,
+    hour         TIMESTAMPTZ NOT NULL,
+    percent      DOUBLE PRECISION NOT NULL,
+    speed_ms     DOUBLE PRECISION NOT NULL,
+    from_degrees DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (athlete_id, segment_id, hour)
+);
+CREATE INDEX IF NOT EXISTS wind_effects_segment_idx ON wind_effects (segment_id);
+
+-- Stored by rounded grid point, with no link to a segment or rider.
+CREATE TABLE IF NOT EXISTS forecasts (
+    lat           DOUBLE PRECISION NOT NULL,
+    lng           DOUBLE PRECISION NOT NULL,
+    hour          TIMESTAMPTZ NOT NULL,
+    speed_ms      DOUBLE PRECISION NOT NULL,
+    from_degrees  DOUBLE PRECISION NOT NULL,
+    temperature_c DOUBLE PRECISION NOT NULL,
+    pressure_hpa  DOUBLE PRECISION NOT NULL,
+    fetched_at    TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (lat, lng, hour)
 );
 
 CREATE TABLE IF NOT EXISTS sync_jobs (

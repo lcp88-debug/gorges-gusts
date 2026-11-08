@@ -105,3 +105,20 @@ def test_purge_runs_at_start_and_then_hourly(conn, db, fake):
     current["now"] = NOW + timedelta(days=6, minutes=30)
     worker.purge_if_due()
     assert conn.execute("SELECT count(*) AS n FROM rides").fetchone()["n"] == 0
+
+
+def test_wind_update_hook_runs_with_a_connection_and_the_time(db):
+    calls = []
+
+    def update_wind(conn, now):
+        calls.append((conn, now))
+        return True
+
+    worker = Worker(db, lambda athlete_id: None, clock=lambda: NOW, update_wind=update_wind)
+
+    assert worker.run_wind_update() is True
+    assert calls[0][1] == NOW
+
+
+def test_no_wind_update_hook_means_nothing_to_do(db):
+    assert Worker(db, lambda athlete_id: None).run_wind_update() is False

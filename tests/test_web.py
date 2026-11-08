@@ -1,5 +1,6 @@
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from urllib.parse import parse_qs, urlparse
 
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.strava import API_URL, OAUTH_URL
+from tests.conftest import LOCAL_ROUTE, OUTSIDE_ROUTE
 
 ATHLETE_ID = 1001
 ACCESS = "made-up-access-token"
@@ -100,7 +102,7 @@ def mock_strava():
             "distance": 3218.68,
             "average_grade": 5.25,
             "private": False,
-            "map": {"polyline": "abc"},
+            "map": {"polyline": LOCAL_ROUTE},
             "athlete_count": 12,
             "effort_count": 3456,
             "athlete_segment_stats": {"effort_count": 7},
@@ -114,7 +116,7 @@ def mock_strava():
             "distance": 1609.34,
             "average_grade": 1.0,
             "private": False,
-            "map": {"polyline": "def"},
+            "map": {"polyline": LOCAL_ROUTE},
             "athlete_count": 9000,
             "effort_count": 50000,
         },
@@ -234,7 +236,7 @@ def test_no_segments_message(app, client):
     responses.get(f"{API_URL}/athlete/activities", json=[])
     app.state.worker.run_next_job()
 
-    assert "No segments found" in client.get("/").text
+    assert "No segments in this area" in client.get("/").text
 
 
 @responses.activate
@@ -259,7 +261,7 @@ def test_returning_after_data_expired_reloads_instead_of_showing_an_empty_list(a
     page = client.get("/").text
 
     assert "Checking Strava" in page
-    assert "No segments found" not in page
+    assert "No segments in this area" not in page
 
 
 @responses.activate
@@ -271,7 +273,7 @@ def test_failed_first_load_shows_the_error_without_an_empty_list_or_retry(app, c
     page = client.get("/").text
 
     assert "log in with Strava again" in page
-    assert "No segments found" not in page
+    assert "No segments in this area" not in page
     assert "Most attempted" not in page
     with db.connect() as conn:
         assert conn.execute("SELECT count(*) AS n FROM sync_jobs").fetchone()["n"] == 1
@@ -307,9 +309,10 @@ def seed_contributor_segment(db, contributes=True):
         )
         conn.execute(
             """
-            INSERT INTO segments (id, name, athlete_count, effort_count, fetched_at)
-            VALUES (700, 'Their Climb', 50000, 90000, now())
-            """
+            INSERT INTO segments (id, name, polyline, athlete_count, effort_count, fetched_at)
+            VALUES (700, 'Their Climb', %s, 50000, 90000, now())
+            """,
+            (LOCAL_ROUTE,),
         )
 
 
@@ -429,7 +432,7 @@ def test_rides_expiring_soon_after_a_refresh_trigger_a_new_sync_not_an_empty_lis
 
     page = client.get("/").text
 
-    assert "No segments found" not in page
+    assert "No segments in this area" not in page
     assert "Checking Strava" in page
     assert app.state.worker.run_next_job() is True
     assert "Popular Road" in client.get("/").text
@@ -445,3 +448,146 @@ def test_cleanup_with_nothing_expired_does_not_trigger_a_sync(app, client):
     client.get("/")
 
     assert app.state.worker.run_next_job() is False
+
+
+def add_wind_numbers(db, segment_id, percents, less_certain=False):
+    """Stores made-up wind effects, one per hour starting from this hour."""
+    this_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO segment_wind_models (segment_id, steps, less_certain) VALUES (%s, '[]', %s)",
+            (segment_id, less_certain),
+        )
+        for index, percent in enumerate(percents):
+            conn.execute(
+                """
+                INSERT INTO wind_effects (athlete_id, segment_id, hour, percent, speed_ms, from_degrees)
+                VALUES (%s, %s, %s, %s, 4.4704, 225)
+                """,
+                (ATHLETE_ID, segment_id, this_hour + timedelta(hours=index), percent),
+            )
+
+
+@responses.activate
+def test_rows_show_now_best_and_hours(app, client, db):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+    add_wind_numbers(db, 500, [3.4, -8.6])
+
+    page = client.get("/").text
+
+    assert "+3%" in page and "−9%" in page
+    assert "10 mph from SW" in page
+    assert "<summary>Hours</summary>" in page
+    assert "Less certain" not in page
+    assert "estimates from forecast wind" in page
+    assert "Open-Meteo" in page and "ESA WorldCover" in page and "Copernicus DEM" in page
+
+
+@responses.activate
+def test_less_certain_numbers_are_marked(app, client, db):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+    add_wind_numbers(db, 500, [3.0], less_certain=True)
+
+    assert 'title="Less certain' in client.get("/").text
+
+
+@responses.activate
+def test_clicking_a_wind_heading_sorts_the_current_list(app, client, db):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+    add_wind_numbers(db, 500, [5.0, 4.0])
+    add_wind_numbers(db, 600, [-2.0, 9.0])
+
+    assert segment_order(client.get("/?sort=attempted").text) == ["Often &lt;Climb&gt;", "Popular Road"]
+    page = client.get("/?sort=attempted&by=now").text
+    assert segment_order(page) == ["Popular Road", "Often &lt;Climb&gt;"]
+    assert 'href="/?sort=attempted&amp;by=best"' in page
+    assert segment_order(client.get("/?sort=attempted&by=nonsense").text) == [
+        "Often &lt;Climb&gt;",
+        "Popular Road",
+    ]
+
+
+@responses.activate
+def test_missing_wind_shows_a_dash_and_no_hours(app, client):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+
+    page = client.get("/").text
+
+    assert "<summary>Hours</summary>" not in page
+    assert page.count("<td>–</td>") == 4
+
+
+@responses.activate
+def test_profile_is_saved_and_asks_for_new_numbers(app, client, db):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+    with db.connect() as conn:
+        conn.execute("UPDATE athletes SET wind_stale = FALSE")
+
+    response = client.post("/profile", data={"weight_kg": "68.5", "power_20min_w": "275"})
+
+    assert response.status_code == 303
+    with db.connect() as conn:
+        row = conn.execute("SELECT weight_kg, power_20min_w, wind_stale FROM athletes").fetchone()
+    assert row == {"weight_kg": 68.5, "power_20min_w": 275, "wind_stale": True}
+    page = client.get("/").text
+    assert 'value="68.5"' in page and 'value="275.0"' in page
+
+
+@responses.activate
+def test_blank_profile_returns_to_standard_values(app, client, db):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+    client.post("/profile", data={"weight_kg": "68", "power_20min_w": "275"})
+
+    client.post("/profile", data={"weight_kg": "", "power_20min_w": ""})
+
+    with db.connect() as conn:
+        row = conn.execute("SELECT weight_kg, power_20min_w FROM athletes").fetchone()
+    assert row == {"weight_kg": None, "power_20min_w": None}
+    page = client.get("/").text
+    assert 'placeholder="75"' in page and 'placeholder="200"' in page
+
+
+@responses.activate
+@pytest.mark.parametrize(
+    "weight, power", [("5", "200"), ("70", "5000"), ("heavy", "200"), ("nan", "200"), ("70", "inf")]
+)
+def test_invalid_profile_changes_nothing_and_explains(app, client, db, weight, power):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+
+    client.post("/profile", data={"weight_kg": weight, "power_20min_w": power})
+
+    with db.connect() as conn:
+        row = conn.execute("SELECT weight_kg, power_20min_w FROM athletes").fetchone()
+    assert row == {"weight_kg": None, "power_20min_w": None}
+    assert "Nothing was changed" in client.get("/").text
+    assert "Nothing was changed" not in client.get("/").text
+
+
+def test_profile_needs_a_login(client, db):
+    assert client.post("/profile", data={"weight_kg": "70"}).status_code == 303
+
+
+@responses.activate
+def test_segments_outside_the_region_do_not_appear(app, client, db):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+    with db.connect() as conn:
+        conn.execute("UPDATE segments SET polyline = %s WHERE id = 600", (OUTSIDE_ROUTE,))
+
+    for sort in ("attempted", "popular"):
+        assert segment_order(client.get(f"/?sort={sort}").text) == ["Often &lt;Climb&gt;"]
