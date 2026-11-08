@@ -7,6 +7,7 @@
   </div>
 {% endblock %}
 {% macro wind_cell(row, certain) %}{% if row %}{{ row.percent | wind_percent }}{% if not certain %} <abbr title="Less certain: steep ground or a steep descent">~</abbr>{% endif %}{% else %}–{% endif %}{% endmacro %}
+{% macro sort_heading(key) %}<th scope="col"{% if list_settings.sort_field == key %} aria-sort="{{ 'ascending' if list_settings.sort_direction == 'asc' else 'descending' }}"{% endif %}><form method="post" action="/sort"><input type="hidden" name="list" value="{{ list }}"><button name="field" value="{{ key }}">{{ fields[key].label }}</button></form>{% if list_settings.sort_field == key %} <span aria-hidden="true">{{ '↑' if list_settings.sort_direction == 'asc' else '↓' }}</span>{% endif %}</th>{% endmacro %}
 {% block content %}
   {% if profile_error %}<p class="notice error" role="alert">{{ profile_error }}</p>{% endif %}
   {% if active %}
@@ -39,15 +40,15 @@
         <table>
           <thead>
             <tr>
-              <th scope="col">Segment</th>
-              <th scope="col">Distance</th>
-              <th scope="col">Avg grade</th>
-              <th scope="col">Your efforts, 90 days</th>
-              <th scope="col"><a href="/?list={{ list }}&amp;by=now"{% if by == "now" %} aria-current="true"{% endif %}>Now</a></th>
-              <th scope="col"><a href="/?list={{ list }}&amp;by=best"{% if by == "best" %} aria-current="true"{% endif %}>Best</a></th>
+              <th scope="col">{{ fields.name.label }}</th>
+              {{ sort_heading("distance") }}
+              {{ sort_heading("average_grade") }}
+              {{ sort_heading("your_attempts") }}
+              {{ sort_heading("wind_now") }}
+              {{ sort_heading("best_hour") }}
               <th scope="col">Next 48 hours</th>
-              <th scope="col">Athletes</th>
-              <th scope="col">Total efforts</th>
+              {{ sort_heading("people_on_strava") }}
+              {{ sort_heading("total_attempts") }}
               <th scope="col"><span hidden>Link</span></th>
             </tr>
           </thead>
