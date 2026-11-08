@@ -21,7 +21,7 @@ class Settings:
     token_encryption_key: str
     redirect_uri: str = "http://localhost:8000/auth/callback"
     # Must stay off until webhooks are running.
-    pooled_most_popular: bool = False
+    pooled_explore: bool = False
     map_dir: str = str(Path.home() / ".local/share/gorges-gusts/maps")
 
 
@@ -33,5 +33,5 @@ def load_settings() -> Settings:
         strava_client_secret=os.environ["STRAVA_CLIENT_SECRET"],
         session_secret=os.environ["SESSION_SECRET"],
         token_encryption_key=os.environ["TOKEN_ENCRYPTION_KEY"],
-        pooled_most_popular=os.environ.get("POOLED_MOST_POPULAR", "").lower() == "true",
+        pooled_explore=os.environ.get("POOLED_EXPLORE", "").lower() == "true",
     )

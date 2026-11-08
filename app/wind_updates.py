@@ -217,7 +217,7 @@ def update_next_rider(
         (now, rider["id"]),
     )
     try:
-        segment_ids = [row["id"] for row in segment_list(conn, rider["id"], "popular", now, pooled)]
+        segment_ids = [row["id"] for row in segment_list(conn, rider["id"], "explore", now, pooled)]
         _ensure_models(conn, segment_ids, maps)
         models = _load_models(conn, segment_ids)
         points = {grid_point(step.lat, step.lng) for table in models.values() for step in table}

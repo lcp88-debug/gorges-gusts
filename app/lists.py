@@ -5,11 +5,11 @@ import psycopg
 from app.config import RIDE_WINDOW
 from app.region import route_in_region
 
-SORT_ORDERS = {
-    "attempted": "recent_efforts DESC, lower(s.name), s.id",
-    "popular": "s.athlete_count DESC NULLS LAST, lower(s.name), s.id",
+LIST_ORDERS = {
+    "my_segments": "recent_efforts DESC, lower(s.name), s.id",
+    "explore": "s.athlete_count DESC NULLS LAST, lower(s.name), s.id",
 }
-DEFAULT_SORT = "attempted"
+DEFAULT_LIST = "my_segments"
 WIND_SORTS = ("now", "best")
 FORECAST_HOURS = 48
 
@@ -29,15 +29,15 @@ def has_missing_details(conn: psycopg.Connection, athlete_id: int) -> bool:
 
 
 def segment_list(
-    conn: psycopg.Connection, athlete_id: int, sort: str, now: datetime, pooled: bool = False
+    conn: psycopg.Connection, athlete_id: int, kind: str, now: datetime, pooled: bool = False
 ) -> list[dict]:
-    """An athlete's segments from their last 90 days of rides, sorted by `sort`.
+    """An athlete's segments from their last 90 days of rides, for the list `kind`.
 
-    With `pooled`, Most Popular also includes segments from contributors' rides.
-    Most Attempted always stays limited to the athlete's own segments.
+    With `pooled`, Explore also includes segments from contributors' rides.
+    My Segments always stays limited to the athlete's own segments.
     Segments with any part of their route outside the region are left out of both.
     """
-    order_by = SORT_ORDERS[sort]  # Keys are fixed above, so this is safe in the query.
+    order_by = LIST_ORDERS[kind]  # Keys are fixed above, so this is safe in the query.
     rows = conn.execute(
         f"""
         SELECT s.polyline, s.id, s.name, s.distance_m, s.average_grade, s.athlete_count, s.effort_count,
@@ -53,7 +53,7 @@ def segment_list(
         {
             "athlete_id": athlete_id,
             "cutoff": now - RIDE_WINDOW,
-            "pooled": pooled and sort == "popular",
+            "pooled": pooled and kind == "explore",
         },
     ).fetchall()
     return [
