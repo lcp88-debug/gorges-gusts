@@ -31,6 +31,9 @@ from app.wind_updates import update_next_rider, wind_pending
 from app.worker import Worker, enqueue_sync
 
 METERS_PER_MILE = 1609.34
+FEET_PER_METER = 3.28084
+# Strava's climb_category, 0 to 5, as riders know it.
+CLIMB_CATEGORIES = ("none", "4", "3", "2", "1", "HC")
 MPH_PER_MS = 2.23694
 WEIGHT_RANGE_KG = (30, 200)
 POWER_RANGE_W = (50, 600)
@@ -43,6 +46,13 @@ templates.env.filters["miles"] = lambda meters: (
 )
 templates.env.filters["percent"] = lambda grade: "–" if grade is None else f"{grade:.1f}%"
 templates.env.filters["count"] = lambda value: "–" if value is None else f"{value:,}"
+templates.env.filters["feet"] = lambda meters: (
+    "–" if meters is None else f"{meters * FEET_PER_METER:,.0f} ft"
+)
+templates.env.filters["climb_category"] = lambda category: (
+    CLIMB_CATEGORIES[category] if category in range(len(CLIMB_CATEGORIES)) else "–"
+)
+templates.env.filters["blank"] = lambda value: "–" if value is None else value
 templates.env.filters["localtime"] = lambda value: value.astimezone().strftime("%H:%M")
 
 
@@ -58,6 +68,16 @@ def _hour(value: datetime) -> str:
     return f"{local:%a} {local.hour % 12 or 12}{'am' if local.hour < 12 else 'pm'}"
 
 
+def _duration(seconds: int | None) -> str:
+    """m:ss, or h:mm:ss for an hour or more."""
+    if seconds is None:
+        return "–"
+    hours, rest = divmod(seconds, 3600)
+    minutes, seconds = divmod(rest, 60)
+    return f"{hours}:{minutes:02}:{seconds:02}" if hours else f"{minutes}:{seconds:02}"
+
+
+templates.env.filters["duration"] = _duration
 templates.env.filters["wind_percent"] = _wind_percent
 templates.env.filters["hour"] = _hour
 templates.env.filters["mph"] = lambda speed: f"{speed * MPH_PER_MS:.0f} mph"

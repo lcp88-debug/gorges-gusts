@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS efforts (
     ride_id    BIGINT NOT NULL REFERENCES rides (id) ON DELETE CASCADE,
     segment_id BIGINT NOT NULL,
     start_date TIMESTAMPTZ NOT NULL,
+    elapsed_s  INTEGER,
     fetched_at TIMESTAMPTZ NOT NULL
 );
 -- True only for rides visible to everyone. Older rows stay false until refetched.
@@ -76,8 +77,37 @@ CREATE TABLE IF NOT EXISTS segments (
     polyline      TEXT,
     athlete_count BIGINT,
     effort_count  BIGINT,
+    -- Strava's city.
+    town          TEXT,
+    maximum_grade DOUBLE PRECISION,
+    -- Strava's 0 to 5: 0 is not a climb, 1 is category 4 and 5 is HC.
+    climb_category INTEGER,
+    elevation_gain_m DOUBLE PRECISION,
     fetched_at    TIMESTAMPTZ NOT NULL
 );
+
+-- Older versions lacked town, steepest grade, climb category, elevation gain and attempt
+-- times. It's only a cache, so clear it once and let each rider's next visit fetch it again.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'segments'
+          AND column_name = 'climb_category'
+    ) OR NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'efforts'
+          AND column_name = 'elapsed_s'
+    ) THEN
+        TRUNCATE rides, efforts, segments CASCADE;
+        UPDATE athletes SET last_synced_at = NULL, wind_stale = TRUE;
+    END IF;
+END $$;
+ALTER TABLE efforts ADD COLUMN IF NOT EXISTS elapsed_s INTEGER;
+ALTER TABLE segments ADD COLUMN IF NOT EXISTS town TEXT;
+ALTER TABLE segments ADD COLUMN IF NOT EXISTS maximum_grade DOUBLE PRECISION;
+ALTER TABLE segments ADD COLUMN IF NOT EXISTS climb_category INTEGER;
+ALTER TABLE segments ADD COLUMN IF NOT EXISTS elevation_gain_m DOUBLE PRECISION;
 
 -- Derived from a segment's route, so it's deleted along with the segment.
 CREATE TABLE IF NOT EXISTS segment_wind_models (
