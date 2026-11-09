@@ -136,3 +136,15 @@ def test_a_bad_category_changes_nothing(synced):
 
     assert response.status_code == 303
     assert 'name="name_search" value="x"' in synced.get("/").text
+
+
+def test_an_empty_list_blames_filters_only_when_they_apply(synced, db):
+    set_column(db, "town", {500: "Ithaca", 600: "Dryden", 700: "Ithaca"})
+    filter_by(synced, town_Ithaca="on")
+    with db.connect() as conn:  # The rider's segments are gone, so the town tick has no box.
+        conn.execute("DELETE FROM efforts")
+
+    page = synced.get("/").text
+
+    assert "No segments match your filters" not in page
+    assert "No segments in this area" in page
