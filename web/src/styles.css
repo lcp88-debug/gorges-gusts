@@ -187,7 +187,8 @@ nav.bottom button[aria-current] { color: var(--accent); font-weight: 600; }
 .login-card { max-width: 30rem; display: grid; gap: 1.25rem; }
 .login h1 { font: 700 clamp(2.2rem, 7vw, 3.2rem)/1 var(--font-num); margin: 0; text-wrap: balance; }
 .login .pitch { font-size: 1.25rem; margin: 0; text-wrap: balance; }
-.connect { text-decoration: none; justify-self: start; display: inline-flex; align-items: center; gap: .6rem; background: var(--strava); color: #fff; border: 0; border-radius: .35rem; padding: .7rem 1.1rem; font-weight: 600; cursor: pointer; }
+.connect { justify-self: start; display: inline-block; line-height: 0; border-radius: 6px; }
+.connect img { display: block; max-width: 100%; height: auto; }
 .login .privacy { font-size: .9rem; color: var(--muted); display: grid; gap: .5rem; border-top: 1px solid var(--line); padding-top: 1rem; }
 .login .privacy p { margin: 0; }
 
