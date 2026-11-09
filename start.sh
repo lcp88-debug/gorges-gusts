@@ -8,10 +8,22 @@ PORT=8000
 PGDATA_DIR="$HOME/.local/share/gorges-gusts/pgdata"
 CONDA_BASE="$(conda info --base 2>/dev/null || echo /Applications/anaconda3)"
 PG_CTL="$CONDA_BASE/envs/gorges-pg/bin/pg_ctl"
+NODE_BIN="$CONDA_BASE/envs/gorges-node/bin"
 
-if [ ! -x "$PG_CTL" ] || [ ! -x .venv/bin/python ]; then
+if [ ! -x "$PG_CTL" ] || [ ! -x .venv/bin/python ] || [ ! -x "$NODE_BIN/npm" ]; then
   echo "Setup isn't finished. See 'One-time setup' in README.md." >&2
   exit 1
+fi
+
+# Build the app's screens if they're missing or older than their code.
+export PATH="$NODE_BIN:$PATH"
+if [ ! -d web/node_modules ] || [ web/package-lock.json -nt web/node_modules ]; then
+  echo "Installing the screens' packages..."
+  (cd web && npm ci --no-audit --no-fund >/dev/null && touch node_modules)
+fi
+if [ ! -f web/dist/index.html ] || [ -n "$(find web/src web/index.html web/package.json -newer web/dist/index.html 2>/dev/null | head -1)" ]; then
+  echo "Building the screens..."
+  (cd web && npm run build >/dev/null)
 fi
 
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then

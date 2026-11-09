@@ -1,37 +1,22 @@
 """The JSON routes the React app calls: what they send, and what they save."""
 
+import base64
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
 import responses
+from fastapi.testclient import TestClient
 
-from tests.test_list_sort import add_third_segment, set_column, synced  # noqa: F401 (fixtures)
-from tests.test_web import (  # noqa: F401 (fixtures)
-    add_wind_numbers,
-    app,
-    client,
-    log_in,
-    mock_strava,
-    pooled_app,
-    pooled_client,
-)
+from app.api import saved_time_range
+from app.strava import API_URL
+from tests.helpers import add_wind_numbers, hour, log_in, mock_strava, saved_settings, this_hour
 
-
-def this_hour():
-    return datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-
-
-def hour(offset):
-    return (this_hour() + timedelta(hours=offset)).isoformat()
+OTHER = 3003
 
 
 def saved_row(db, kind="my_segments"):
-    with db.connect() as conn:
-        return conn.execute(
-            "SELECT sort_field, sort_direction, filters FROM list_settings"
-            " WHERE athlete_id = 1001 AND list_kind = %s",
-            (kind,),
-        ).fetchone()
+    return saved_settings(db, kind)
 
 
 # State
@@ -70,8 +55,6 @@ def test_first_visit_shows_the_sync_in_progress_then_the_lists(app, client):
 
 @responses.activate
 def test_a_failed_sync_is_reported_and_not_retried(app, client, db):
-    from app.strava import API_URL
-
     log_in(client)
     responses.get(f"{API_URL}/athlete/activities", status=401, json={})
     app.state.worker.run_next_job()
@@ -282,7 +265,9 @@ def test_blank_profile_boxes_go_back_to_standard_values(synced):
     assert profile["weight_kg"] is None and profile["power_20min_w"] is None
 
 
-@pytest.mark.parametrize("weight, power", [("heavy", 200), (10, 200), (70, 5000), (True, 200)])
+@pytest.mark.parametrize(
+    "weight, power", [("heavy", 200), (10, 200), (70, 5000), (True, 200), ("nan", 200), (70, "inf")]
+)
 def test_a_bad_profile_changes_nothing_and_explains(synced, weight, power):
     synced.put("/api/profile", json={"weight_kg": 70, "power_20min_w": 200})
 
@@ -331,3 +316,105 @@ def test_logging_out_ends_the_session(synced):
 def test_changes_need_a_login(client, method, path, body):
     kwargs = {"json": body} if body is not None else {}
     assert client.request(method.upper(), path, **kwargs).status_code == 401
+
+
+def test_each_rider_has_their_own_saved_choices(synced, app, db):
+    synced.put("/api/lists/my_segments/sort", json={"field": "distance", "direction": "asc"})
+
+    with TestClient(app, follow_redirects=False, base_url="http://localhost") as other:
+        log_in(other, athlete_id=OTHER)
+        assert other.get("/api/lists/my_segments").json()["sort"]["field"] == "your_attempts"
+    assert synced.get("/api/lists/my_segments").json()["sort"]["field"] == "distance"
+
+
+def test_saved_choices_are_deleted_with_the_rider(synced, db):
+    synced.put("/api/lists/my_segments/sort", json={"field": "distance", "direction": "asc"})
+
+    with db.connect() as conn:
+        conn.execute("DELETE FROM athletes WHERE id = 1001")
+        assert conn.execute("SELECT count(*) AS n FROM list_settings").fetchone()["n"] == 0
+
+
+def test_an_unknown_saved_sort_falls_back_to_the_default(synced, db):
+    synced.put("/api/lists/my_segments/sort", json={"field": "distance", "direction": "asc"})
+    with db.connect() as conn:
+        conn.execute("UPDATE list_settings SET sort_field = 'retired_field'")
+
+    assert synced.get("/api/lists/my_segments").json()["sort"] == {"field": "your_attempts", "direction": "desc"}
+
+
+def test_unknown_or_malformed_saved_filters_are_not_sent(synced, db):
+    synced.put("/api/lists/my_segments/filters", json={"filters": {"distance": {"min": 1}}})
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE list_settings SET filters = %s::jsonb",
+            ['{"retired": {"min": 1}, "distance": {"min": 1}, "average_grade": "junk"}'],
+        )
+
+    assert synced.get("/api/lists/my_segments").json()["filters"] == {"distance": {"min": 1.0}}
+
+
+def test_the_range_is_kept_while_the_rider_keeps_using_the_app(synced, db):
+    synced.put("/api/lists/my_segments/time-range", json={"start": hour(3), "end": hour(4)})
+    with db.connect() as conn:
+        conn.execute("UPDATE athletes SET last_seen_at = now() - interval '50 minutes'")
+
+    synced.get("/api/state")
+
+    assert synced.get("/api/lists/my_segments").json()["time_range"] == [hour(3), hour(4)]
+
+
+def test_a_range_set_after_a_long_time_away_is_kept(synced, db):
+    with db.connect() as conn:  # The page was left open, then the rider came back.
+        conn.execute("UPDATE athletes SET last_seen_at = now() - interval '2 hours'")
+
+    synced.put("/api/lists/my_segments/time-range", json={"start": hour(3), "end": hour(4)})
+
+    synced.get("/api/state")
+    assert synced.get("/api/lists/my_segments").json()["time_range"] == [hour(3), hour(4)]
+
+
+def test_coming_back_by_setting_a_range_still_resets_the_other_lists_range(synced, db):
+    synced.put("/api/lists/explore/time-range", json={"start": hour(3), "end": hour(4)})
+    with db.connect() as conn:
+        conn.execute("UPDATE athletes SET last_seen_at = now() - interval '2 hours'")
+
+    synced.put("/api/lists/my_segments/time-range", json={"start": hour(3), "end": hour(4)})
+
+    assert synced.get("/api/lists/explore").json()["time_range"] is None
+    assert synced.get("/api/lists/my_segments").json()["time_range"] == [hour(3), hour(4)]
+
+
+class FakeRequest:
+    def __init__(self, ranges):
+        self.session = {"time_ranges": ranges}
+
+
+def test_a_range_that_has_partly_passed_keeps_only_the_hours_to_come():
+    now = this_hour() + timedelta(minutes=30)
+    request = FakeRequest({"my_segments": [hour(-2), hour(3)]})
+
+    assert saved_time_range(request, "my_segments", now) == (this_hour(), this_hour() + timedelta(hours=3))
+
+
+def test_a_range_that_has_ended_goes_back_to_all_48_hours():
+    request = FakeRequest({"my_segments": [hour(-3), hour(-1)]})
+
+    assert saved_time_range(request, "my_segments", datetime.now(timezone.utc)) is None
+
+
+def session_contents(client):
+    """The rider's session as the browser holds it (signed, but readable)."""
+    data = client.cookies["session"].split(".")[0]
+    return json.loads(base64.b64decode(data + "=" * (-len(data) % 4)))
+
+
+def test_a_second_rider_logging_in_on_the_same_browser_starts_with_no_range(synced, db):
+    synced.put("/api/lists/my_segments/time-range", json={"start": hour(3), "end": hour(4)})
+    assert "time_ranges" in session_contents(synced)
+
+    log_in(synced, athlete_id=2002)  # Rider A never logged out.
+
+    session = session_contents(synced)
+    assert session["athlete_id"] == 2002
+    assert "time_ranges" not in session

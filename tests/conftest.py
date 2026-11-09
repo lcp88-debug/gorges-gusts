@@ -1,13 +1,16 @@
 import os
+from dataclasses import replace
 from datetime import datetime, timezone
-from html.parser import HTMLParser
 
 import pytest
+import responses
 from cryptography.fernet import Fernet
+from fastapi.testclient import TestClient
 from dotenv import load_dotenv
 
 from app.config import Settings
 from app.db import Database
+from app.main import create_app
 
 load_dotenv()
 
@@ -113,50 +116,6 @@ class FakeStrava:
         }
 
 
-class _Table(HTMLParser):
-    """Reads the list's headings and the text of each row's own cells, skipping hour views."""
-
-    def __init__(self):
-        super().__init__()
-        self.headings: list[str] = []
-        self.rows: list[list[str]] = []
-        self.row: list[str] = []
-        self.depth = 0
-        self.cell: str | None = None
-
-    def handle_starttag(self, tag, attrs):
-        if tag == "table":
-            self.depth += 1
-        elif self.depth == 1 and tag == "tr":
-            self.row = []
-        elif self.depth == 1 and tag in ("th", "td"):
-            self.cell = ""
-
-    def handle_endtag(self, tag):
-        if tag == "table":
-            self.depth -= 1
-        elif self.depth == 1 and tag in ("th", "td"):
-            self.row.append(" ".join(self.cell.split()))
-            self.cell = None
-        elif self.depth == 1 and tag == "tr":
-            if self.headings:
-                self.rows.append(self.row)
-            else:
-                self.headings = self.row
-
-    def handle_data(self, data):
-        if self.depth == 1 and self.cell is not None:
-            self.cell += data
-
-
-def table(html):
-    """Each row as {heading: cell text}, in page order. Sort arrows are left out."""
-    parser = _Table()
-    parser.feed(html)
-    headings = [heading.rstrip(" ↑↓") for heading in parser.headings]
-    return [dict(zip(headings, row)) for row in parser.rows]
-
-
 @pytest.fixture
 def fake():
     return FakeStrava()
@@ -194,3 +153,48 @@ def settings():
         session_secret="test-session-secret",
         token_encryption_key=Fernet.generate_key().decode(),
     )
+
+
+# The web app, logged-out and logged-in. Strava is never contacted: logins and syncs use
+# made-up replies from tests/helpers.py.
+
+
+@pytest.fixture
+def app(db, settings):
+    return create_app(settings, start_worker=False)
+
+
+@pytest.fixture
+def client(app):
+    with TestClient(app, follow_redirects=False, base_url="http://localhost") as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def pooled_app(db, settings):
+    return create_app(replace(settings, pooled_explore=True), start_worker=False)
+
+
+@pytest.fixture
+def pooled_client(pooled_app):
+    with TestClient(pooled_app, follow_redirects=False, base_url="http://localhost") as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def synced(app, client, db):
+    """A logged-in rider with three segments: 500 and 600 from Strava, 700 added here."""
+    from tests.helpers import add_third_segment, log_in, mock_strava  # helpers imports conftest
+
+    # Started here rather than with @responses.activate, so the made-up Strava
+    # replies also cover this setup and any later logins in the test.
+    responses.start()
+    try:
+        log_in(client)
+        mock_strava()
+        app.state.worker.run_next_job()
+        add_third_segment(db)
+        yield client
+    finally:
+        responses.stop()
+        responses.reset()

@@ -1,14 +1,12 @@
 """All routes, riders, maps and forecasts here are made up."""
 
-import re
 from datetime import timedelta
 
 import pytest
 
 from app.db import purge_expired
-from app.lists import add_wind
+from app.lists import wind_hours
 from app.region import in_region
-from app.main import _hour, _wind_percent, templates
 from app.weather import WeatherUnavailable, grid_point
 from app.wind import Wind
 from app.wind_updates import update_next_rider, wind_pending
@@ -196,9 +194,8 @@ class TestUpdate:
         add_segment(conn, 2, grade=1.0)
         mark_seen(conn)
         run(conn)
-        rows = [{"id": 1}, {"id": 2}]
-        add_wind(conn, ATHLETE, rows, NOW)
-        assert [row["less_certain"] for row in rows] == [True, False]
+        _hours, less_certain = wind_hours(conn, ATHLETE, [{"id": 1}, {"id": 2}], NOW)
+        assert less_certain == {1}
 
 
 class TestRegion:
@@ -265,28 +262,27 @@ class TestRetention:
 
 
 class TestListValues:
-    def setup_rows(self, conn):
+    def setup_hours(self, conn):
         add_segment(conn, 1, NORTHBOUND)
         add_segment(conn, 2, SOUTHBOUND)
         add_segment(conn, 3, None)
         mark_seen(conn)
         run(conn)
-        rows = [{"id": 1}, {"id": 2}, {"id": 3}]
-        add_wind(conn, ATHLETE, rows, NOW)
-        return rows
+        hours, _less_certain = wind_hours(conn, ATHLETE, [{"id": 1}, {"id": 2}, {"id": 3}], NOW)
+        return hours
 
-    def test_now_is_this_hour_and_best_is_the_lowest(self, conn):
-        first, second, missing = self.setup_rows(conn)
-        assert first["wind_now"]["hour"] == THIS_HOUR
-        assert first["wind_best"]["hour"] == THIS_HOUR
-        assert second["wind_best"]["hour"] == THIS_HOUR + timedelta(hours=1)
-        assert missing["wind_now"] is None and missing["wind_best"] is None
+    def test_hours_start_this_hour_in_order(self, conn):
+        hours = self.setup_hours(conn)
+        assert [row["hour"] for row in hours[1]] == [THIS_HOUR, THIS_HOUR + timedelta(hours=1)]
+        # The forecast changes between the two hours, so each segment does best in a different one.
+        assert hours[1][0]["percent"] < hours[1][1]["percent"]
+        assert hours[2][1]["percent"] < hours[2][0]["percent"]
+        assert 3 not in hours
 
     def test_other_riders_numbers_are_not_mixed_in(self, conn):
-        self.setup_rows(conn)
-        rows = [{"id": 1}]
-        add_wind(conn, OTHER_ATHLETE, rows, NOW)
-        assert rows[0]["wind_hours"] == []
+        self.setup_hours(conn)
+        hours, _less_certain = wind_hours(conn, OTHER_ATHLETE, [{"id": 1}], NOW)
+        assert hours == {}
 
 
 class TestWindPending:
@@ -311,16 +307,3 @@ class TestWindPending:
     def test_a_run_that_died_stops_counting(self):
         started = NOW + timedelta(minutes=1)
         assert not wind_pending(self.row(started=started), started + timedelta(minutes=11))
-
-
-class TestFilters:
-    def test_percentages_and_labels(self):
-        assert _wind_percent(-5.6) == "\u22126%"
-        assert _wind_percent(5.6) == "+6%"
-        assert _wind_percent(-0.4) == "0%"
-        assert _wind_percent(0.4) == "0%"
-        assert re.fullmatch(r"\w{3} \d{1,2}(am|pm)", _hour(NOW))
-        assert templates.env.filters["compass"](0) == "N"
-        assert templates.env.filters["compass"](355) == "N"
-        assert templates.env.filters["compass"](225) == "SW"
-        assert templates.env.filters["mph"](4.4704) == "10 mph"

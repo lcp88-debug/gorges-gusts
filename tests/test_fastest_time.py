@@ -7,11 +7,8 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.sync import read_overall_time, run_sync
-from tests.conftest import ATHLETE, NOW, table
-from tests.test_list_fields import column
-from tests.test_list_number_filters import filter_by
-from tests.test_list_sort import order, set_column, sort_by, synced  # noqa: F401 (fixtures)
-from tests.test_web import log_in  # noqa: F401 (fixtures)
+from tests.conftest import ATHLETE, NOW
+from tests.helpers import saved_settings, segments, set_column
 
 # Pages in this file run with the setting on, unless marked `setting_off`.
 setting_off = pytest.mark.setting_off
@@ -145,121 +142,84 @@ def test_overall_time_text_is_read_as_seconds():
     assert read_overall_time("1:02:03") == 3723
 
 
-# Page
+# The app
 
 
-def test_the_page_shows_fastest_time_as_m_ss_and_h_mm_ss(synced, db):
+def test_the_app_gets_fastest_times_while_the_setting_is_on(synced, db):
     set_column(db, "fastest_time_s", {500: 229, 600: 3723, 700: None})
 
-    headings = list(table(synced.get("/").text)[0])
-
-    assert "Fastest time" in headings
-    assert column(synced, "Fastest time") == ["3:49", "1:02:03", "–"]
+    assert synced.get("/api/state").json()["fastest_time"] is True
+    assert {id: s["fastest_time_s"] for id, s in segments(synced).items()} == {500: 229, 600: 3723, 700: None}
 
 
-def test_it_sorts_fastest_first_with_blanks_last_and_reverses(synced, db):
-    set_column(db, "fastest_time_s", {500: 300, 600: 200, 700: None})
+def test_it_can_be_sorted_and_filtered_while_the_setting_is_on(synced, db):
+    assert synced.put("/api/lists/my_segments/sort", json={"field": "fastest_time", "direction": "asc"}).status_code == 200
+    synced.put("/api/lists/my_segments/filters", json={"filters": {"fastest_time": {"max": 240}}})
 
-    sort_by(synced, "fastest_time")
-    assert order(synced.get("/").text) == [600, 500, 700]
-
-    sort_by(synced, "fastest_time")
-    assert order(synced.get("/").text) == [500, 600, 700]
-
-
-def test_it_filters_by_minimum_and_maximum_in_minutes_and_seconds(synced, db):
-    set_column(db, "fastest_time_s", {500: 150, 600: 300, 700: None})
-
-    filter_by(synced, fastest_time_min="2:00", fastest_time_max="4:00")
-    assert order(synced.get("/").text) == [500]
-
-    filter_by(synced, fastest_time_min="3:00")
-    assert order(synced.get("/").text) == [600]
-
-
-def test_the_filter_has_boxes_while_the_setting_is_on(synced):
-    page = synced.get("/").text
-
-    assert 'name="fastest_time_min"' in page and 'name="fastest_time_max"' in page
+    data = synced.get("/api/lists/my_segments").json()
+    assert data["sort"] == {"field": "fastest_time", "direction": "asc"}
+    assert data["filters"] == {"fastest_time": {"max": 240.0}}
 
 
 @setting_off
-def test_with_the_setting_off_the_page_has_no_fastest_time_field(synced, db):
+def test_with_the_setting_off_the_app_gets_no_fastest_times(synced, db):
     set_column(db, "fastest_time_s", {500: 229, 600: 3723, 700: None})
 
-    page = synced.get("/").text
-
-    assert "Fastest time" not in page and "fastest_time" not in page
-    assert "3:49" not in page
+    assert synced.get("/api/state").json()["fastest_time"] is False
+    assert all("fastest_time_s" not in segment for segment in segments(synced).values())
 
 
 @setting_off
 def test_with_the_setting_off_it_cannot_be_sorted_or_filtered(synced, db):
-    set_column(db, "fastest_time_s", {500: 300, 600: 200, 700: None})
-    before = order(synced.get("/").text)
+    response = synced.put("/api/lists/my_segments/sort", json={"field": "fastest_time", "direction": "asc"})
+    synced.put("/api/lists/my_segments/filters", json={"filters": {"fastest_time": {"max": 180}}})
 
-    sort_by(synced, "fastest_time")
-    filter_by(synced, fastest_time_max="3:00")
-
-    assert order(synced.get("/").text) == before
+    assert response.status_code == 422
     with db.connect() as conn:
         saved = conn.execute("SELECT sort_field, filters FROM list_settings").fetchall()
     assert not any(row["sort_field"] == "fastest_time" or row["filters"] for row in saved)
 
 
-@setting_off
-def test_a_saved_fastest_time_filter_and_sort_are_ignored_while_it_is_off(synced, db):
-    set_column(db, "fastest_time_s", {500: 300, 600: 200, 700: None})
+def save_directly(db, sort_field, filters):
     with db.connect() as conn:
         conn.execute(
             """
             INSERT INTO list_settings (athlete_id, list_kind, sort_field, sort_direction, filters)
-            VALUES (1001, 'my_segments', 'fastest_time', 'asc', '{"fastest_time": {"max": 250}}')
-            """
+            VALUES (1001, 'my_segments', %s, 'asc', %s)
+            """,
+            (sort_field, filters),
         )
-
-    # All three segments stay, and the sort falls back to the list's own default.
-    assert sorted(order(synced.get("/").text)) == [500, 600, 700]
-    assert "aria-sort" in synced.get("/").text
-    assert 'name="fastest_time_max"' not in synced.get("/").text
 
 
 @setting_off
-def test_a_saved_fastest_time_filter_is_kept_when_other_settings_are_saved_while_off(synced, db):
-    set_column(db, "fastest_time_s", {500: 300, 600: 200, 700: None})
-    with db.connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO list_settings (athlete_id, list_kind, sort_field, sort_direction, filters)
-            VALUES (1001, 'my_segments', 'distance', 'desc', '{"fastest_time": {"max": 250}}')
-            """
-        )
+def test_a_saved_fastest_time_filter_and_sort_are_not_sent_while_it_is_off(synced, db):
+    save_directly(db, "fastest_time", '{"fastest_time": {"max": 250}}')
 
-    sort_by(synced, "average_grade")
-    filter_by(synced, name_search="i")
-    page = synced.get("/").text
-    synced.post("/filters/clear", data={"list": "my_segments"})
+    data = synced.get("/api/lists/my_segments").json()
 
-    assert sorted(order(page)) == [500, 700]  # Only the name search applies.
-    assert "Filters (1 on)" in page
-    with db.connect() as conn:
-        saved = conn.execute("SELECT filters FROM list_settings").fetchone()["filters"]
-    assert saved == {"fastest_time": {"max": 250}}
+    # The sort falls back to the list's own default.
+    assert data["sort"] == {"field": "your_attempts", "direction": "desc"}
+    assert data["filters"] == {}
+
+
+@setting_off
+def test_a_saved_fastest_time_filter_is_kept_when_other_choices_are_saved_while_off(synced, db):
+    save_directly(db, "distance", '{"fastest_time": {"max": 250}}')
+
+    synced.put("/api/lists/my_segments/sort", json={"field": "average_grade", "direction": "desc"})
+    synced.put("/api/lists/my_segments/filters", json={"filters": {"name": "i"}})
+    assert saved_settings(db)["filters"] == {"fastest_time": {"max": 250}, "name": "i"}
+
+    synced.put("/api/lists/my_segments/filters", json={"filters": {}})  # Clear all.
+    assert saved_settings(db)["filters"] == {"fastest_time": {"max": 250}}
 
 
 @setting_off
 def test_a_saved_fastest_time_sort_is_kept_when_filters_are_saved_while_off(synced, db):
-    with db.connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO list_settings (athlete_id, list_kind, sort_field, sort_direction, filters)
-            VALUES (1001, 'my_segments', 'fastest_time', 'asc', '{}')
-            """
-        )
+    save_directly(db, "fastest_time", "{}")
 
-    filter_by(synced, name_search="i")
-    synced.post("/filters/clear", data={"list": "my_segments"})
+    synced.put("/api/lists/my_segments/filters", json={"filters": {"name": "i"}})
+    synced.put("/api/lists/my_segments/filters", json={"filters": {}})
 
-    with db.connect() as conn:
-        saved = conn.execute("SELECT sort_field, sort_direction FROM list_settings").fetchone()
+    saved = saved_settings(db)
     assert (saved["sort_field"], saved["sort_direction"]) == ("fastest_time", "asc")
