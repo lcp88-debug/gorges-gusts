@@ -16,11 +16,12 @@ const SAVE_FILTERS_AFTER_MS = 500;
 export function ListScreen({ kind, state, data, wide, onRefresh, onChoices }: {
   kind: ListKind;
   state: LoggedIn;
-  data: ListData;
+  // `version` changes when the server sends a newer list.
+  data: ListData & { version: string };
   wide: boolean;
   onRefresh: () => void;
-  // Keeps the rider's sort and filters for when they come back to this tab.
-  onChoices: (choices: { sort: Sort; filters: Filters }) => void;
+  // Keeps the rider's choices for when they come back to this tab.
+  onChoices: (choices: { sort?: Sort; filters?: Filters; time_range?: TimeRange }) => void;
 }) {
   // The rider's choices show at once; saving them happens in the background.
   const [sort, setSort] = useState<Sort>(data.sort);
@@ -32,9 +33,35 @@ export function ListScreen({ kind, state, data, wide, onRefresh, onChoices }: {
   const [openId, setOpenId] = useState<number | null>(null);
   const [hoursFor, setHoursFor] = useState<Row | null>(null);
   const filterTimer = useRef<number | undefined>(undefined);
+  // Filters waiting to be saved, sent at once if the page is closed or hidden first.
+  const unsaved = useRef<Filters | null>(null);
+  // The range the server last accepted, and which save is the latest.
+  const savedRange = useRef<TimeRange>(data.time_range);
+  const rangeSave = useRef(0);
 
   // A newer list from the server, after a refresh or a wind update.
-  useEffect(() => setRange(data.time_range), [data.time_range]);
+  // Only a newer list from the server resets the range; a remembered choice doesn't.
+  useEffect(() => {
+    setRange(data.time_range);
+    savedRange.current = data.time_range;
+  }, [data.version]);
+
+  useEffect(() => {
+    const flush = () => {
+      if (!document.hidden && document.visibilityState !== "hidden") return;
+      const filters = unsaved.current;
+      if (filters === null) return;
+      window.clearTimeout(filterTimer.current);
+      unsaved.current = null;
+      api.saveFiltersNow(kind, filters).catch(() => undefined);
+    };
+    document.addEventListener("visibilitychange", flush);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", flush);
+      window.removeEventListener("pagehide", flush);
+    };
+  }, [kind]);
 
   const built = useMemo(
     () => buildList(data.segments, data.this_hour, { sort, filters, timeRange: range }, state.fastest_time),
@@ -45,27 +72,36 @@ export function ListScreen({ kind, state, data, wide, onRefresh, onChoices }: {
 
   function changeSort(next: Sort) {
     setSort(next);
-    onChoices({ sort: next, filters });
+    onChoices({ sort: next });
     api.saveSort(kind, next).then(() => setSaveError(null), failed);
   }
 
   function changeFilters(next: Filters) {
     setFilters(next);
-    onChoices({ sort, filters: next });
+    onChoices({ filters: next });
     window.clearTimeout(filterTimer.current);
-    filterTimer.current = window.setTimeout(
-      () => api.saveFilters(kind, next).then(() => setSaveError(null), failed),
-      SAVE_FILTERS_AFTER_MS,
-    );
+    unsaved.current = next;
+    filterTimer.current = window.setTimeout(() => {
+      unsaved.current = null;
+      api.saveFilters(kind, next).then(() => setSaveError(null), failed);
+    }, SAVE_FILTERS_AFTER_MS);
   }
 
+  // Saves go one at a time (see api.ts). If one fails, the screen goes back to the range
+  // the server holds, unless a newer save is still to come.
   function changeRange(next: TimeRange) {
-    const before = range;
+    const id = ++rangeSave.current;
     setRange(next);
+    onChoices({ time_range: next });
     api.saveTimeRange(kind, next).then(
-      () => setRangeError(null),
+      () => {
+        savedRange.current = next;
+        if (id === rangeSave.current) setRangeError(null);
+      },
       (error) => {
-        setRange(before);
+        if (id !== rangeSave.current) return;
+        setRange(savedRange.current);
+        onChoices({ time_range: savedRange.current });
         setRangeError(error instanceof Refused ? error.message : "Couldn't change the time range. Check your connection.");
       },
     );

@@ -1,6 +1,6 @@
 // The whole app: login, the tabs, and keeping the lists up to date.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type LoggedIn, type State } from "./api";
 import type { ListData, ListKind } from "./rules/types";
 import { ListScreen, syncText } from "./screens/ListScreen";
@@ -28,8 +28,14 @@ export function App() {
   const [offline, setOffline] = useState(false);
   const [tab, setTab] = useState<Tab>(tabFromHash);
   const [lists, setLists] = useState<Partial<Record<ListKind, ListData & { version: string }>>>({});
+  // Lists that failed to load, tried again on the next check that reaches the server.
+  const [failed, setFailed] = useState<Partial<Record<ListKind, boolean>>>({});
+  // The version of each list being fetched right now, so a fetch isn't started twice.
+  const fetching = useRef<Partial<Record<ListKind, string>>>({});
+  const loggingOut = useRef(false);
 
   const check = useCallback(() => {
+    if (loggingOut.current) return;
     api.state().then(
       (next) => {
         setState(next);
@@ -68,23 +74,33 @@ export function App() {
   const loggedIn = state?.logged_in ? state : null;
   const version = loggedIn ? `${loggedIn.lists_version}|${loggedIn.this_hour}` : null;
   const showLists = loggedIn?.show_lists ?? false;
+  // `state` is a dependency so a failed fetch is tried again after the next good check.
   useEffect(() => {
     if (tab === "you" || !version || !showLists || lists[tab]?.version === version) return;
     const kind = tab;
+    if (fetching.current[kind] === version) return;
+    fetching.current[kind] = version;
     api.list(kind).then(
-      (fetched) =>
+      (fetched) => {
         setLists((current) => {
           const kept = current[kind];
           return {
             ...current,
             [kind]: { ...fetched, version, sort: kept?.sort ?? fetched.sort, filters: kept?.filters ?? fetched.filters },
           };
-        }),
-      () => setOffline(true),
-    );
-  }, [tab, version, showLists, lists]);
+        });
+        setFailed((current) => ({ ...current, [kind]: false }));
+      },
+      () => {
+        setFailed((current) => ({ ...current, [kind]: true }));
+        setOffline(true);
+      },
+    ).finally(() => {
+      if (fetching.current[kind] === version) delete fetching.current[kind];
+    });
+  }, [tab, version, showLists, lists, state]);
 
-  const remember = useCallback((kind: ListKind, choices: Pick<ListData, "sort" | "filters">) => {
+  const remember = useCallback((kind: ListKind, choices: Partial<Pick<ListData, "sort" | "filters" | "time_range">>) => {
     setLists((current) => (current[kind] ? { ...current, [kind]: { ...current[kind]!, ...choices } } : current));
   }, []);
 
@@ -92,9 +108,22 @@ export function App() {
     api.refresh().then(check, () => setOffline(true));
   }, [check]);
 
+  // Checks stop first, and logging out waits for replies already on their way: each one
+  // carries the session cookie, and a late one must not log the rider back in.
   const logout = () => {
+    loggingOut.current = true;
     setLists({});
-    api.logout().then(check, () => setOffline(true));
+    api
+      .settled()
+      .then(api.logout)
+      .then(
+        () => setOffline(false),
+        () => setOffline(true),
+      )
+      .finally(() => {
+        loggingOut.current = false;
+        check();
+      });
   };
 
   const go = (next: Tab) => {
@@ -139,6 +168,12 @@ export function App() {
       ) : data ? (
         <ListScreen key={tab} kind={tab} state={state} data={data} wide={wide} onRefresh={refresh}
           onChoices={(choices) => remember(tab, choices)} />
+      ) : failed[tab] && !offline ? (
+        <main className="wrap">
+          <p className="notice error-notice" role="alert">
+            Couldn't load this list. Trying again…
+          </p>
+        </main>
       ) : null}
 
       {!wide && (

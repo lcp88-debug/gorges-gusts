@@ -40,20 +40,35 @@ function list(overrides: Partial<ListData> = {}): ListData {
   };
 }
 
-type Call = { method: string; path: string; body: unknown };
+type Call = { method: string; path: string; body: unknown; keepalive?: boolean };
 
-/** Answers the app's calls from `routes`, and records every call. */
+/**
+ * Answers the app's calls from `routes`, and records every call. A route can be a function,
+ * called for each request, to vary or delay its reply.
+ */
 function serve(routes: Record<string, unknown>) {
   const calls: Call[] = [];
   vi.stubGlobal("fetch", vi.fn(async (path: string, init: RequestInit = {}) => {
     const method = init.method ?? "GET";
-    calls.push({ method, path, body: init.body ? JSON.parse(String(init.body)) : undefined });
-    const reply = routes[`${method} ${path}`] ?? { ok: true };
-    const failed = reply instanceof Response;
-    return failed ? reply : new Response(JSON.stringify(reply), { status: 200 });
+    const call: Call = { method, path, body: init.body ? JSON.parse(String(init.body)) : undefined };
+    if (init.keepalive) call.keepalive = true;
+    calls.push(call);
+    const route = routes[`${method} ${path}`] ?? { ok: true };
+    const reply = typeof route === "function" ? await route() : route;
+    if (reply instanceof Error) throw reply;
+    return reply instanceof Response ? reply : new Response(JSON.stringify(reply), { status: 200 });
   }));
   return calls;
 }
+
+/** A reply that waits until the test releases it. */
+function held<T>(reply: T) {
+  let release = () => {};
+  const promise = new Promise<T>((resolve) => { release = () => resolve(reply); });
+  return { route: () => promise, release };
+}
+
+const refused = (status = 500) => new Response(JSON.stringify({}), { status });
 
 function setWidth(wide: boolean) {
   vi.stubGlobal("matchMedia", (query: string) => ({
@@ -153,6 +168,7 @@ test("sorting from the Sort panel reorders the list and is saved", async () => {
   fireEvent.click(within(screen.getByRole("dialog", { name: "Sort by" })).getByRole("button", { name: /Wind now/ }));
 
   expect(cardNames()).toEqual(["Popular Road", "Often <Climb>", "Third Hill"]);
+  await act(async () => {});
   expect(calls).toContainEqual({ method: "PUT", path: "/api/lists/my_segments/sort", body: { field: "wind_now", direction: "asc" } });
 });
 
@@ -187,6 +203,7 @@ test("a time range changes best hour and is saved", async () => {
   fireEvent.change(screen.getByLabelText("To"), { target: { value: "0" } });
 
   expect(screen.getByRole("button", { name: /Often <Climb>/ }).textContent).not.toContain("−9%");
+  await act(async () => {});
   expect(calls).toContainEqual({
     method: "PUT", path: "/api/lists/my_segments/time-range", body: { start: hour(0), end: hour(0) },
   });
@@ -254,4 +271,123 @@ test("an empty list says why", async () => {
   render(<App />);
 
   expect(await screen.findByText("No segments in this area found in your road rides from the last 90 days.")).toBeTruthy();
+});
+
+test("changing the sort while a newer list loads fetches it only once", async () => {
+  let checks = 0;
+  let fetches = 0;
+  const newer = held(list());
+  serve({
+    "GET /api/state": () => ({ ...LOGGED_IN, lists_version: ++checks === 1 ? "v1" : "v2" }),
+    "GET /api/lists/my_segments": () => (++fetches === 1 ? list() : newer.route()),
+  });
+  render(<App />);
+  await screen.findByRole("button", { name: /Often <Climb>/ });
+
+  act(() => { document.dispatchEvent(new Event("visibilitychange")); }); // New wind numbers: v2.
+  await act(async () => {});
+  expect(fetches).toBe(2);
+  fireEvent.click(screen.getByRole("button", { name: /Sort/ }));
+  fireEvent.click(within(screen.getByRole("dialog", { name: "Sort by" })).getByRole("button", { name: /Wind now/ }));
+  await act(async () => {});
+
+  expect(fetches).toBe(2);
+  await act(async () => newer.release());
+});
+
+test("a list that failed to load is tried again once the server answers", async () => {
+  let attempts = 0;
+  serve({
+    "GET /api/state": LOGGED_IN,
+    "GET /api/lists/my_segments": () => (++attempts === 1 ? new TypeError("offline") : list()),
+  });
+  render(<App />);
+  expect((await screen.findByRole("alert")).textContent).toContain("Can't reach Gorges Gusts");
+
+  act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+
+  expect(await screen.findByRole("button", { name: /Often <Climb>/ })).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+test("a time range is still shown after switching tabs and back", async () => {
+  serve({
+    "GET /api/state": LOGGED_IN,
+    "GET /api/lists/my_segments": list(),
+    "GET /api/lists/explore": list(),
+  });
+  render(<App />);
+  await screen.findByRole("button", { name: /Often <Climb>/ });
+  fireEvent.click(screen.getByRole("button", { name: /Time/ }));
+  fireEvent.change(screen.getByLabelText("To"), { target: { value: "0" } });
+  const shown = screen.getByRole("button", { name: /Time/ }).textContent;
+  expect(shown).not.toContain("48 h");
+
+  fireEvent.click(screen.getByRole("button", { name: "Explore" }));
+  await screen.findByText(/other riders' segments/);
+  fireEvent.click(screen.getByRole("button", { name: "My Segments" }));
+
+  expect((await screen.findByRole("button", { name: /Time/ })).textContent).toBe(shown);
+});
+
+test("an older time range save that fails doesn't undo a newer one", async () => {
+  let saves = 0;
+  const first = held(refused());
+  const calls = serve({
+    "GET /api/state": LOGGED_IN,
+    "GET /api/lists/my_segments": list(),
+    "PUT /api/lists/my_segments/time-range": () => (++saves === 1 ? first.route() : { ok: true }),
+  });
+  render(<App />);
+  await screen.findByRole("button", { name: /Often <Climb>/ });
+  fireEvent.click(screen.getByRole("button", { name: /Time/ }));
+
+  fireEvent.change(screen.getByLabelText("From"), { target: { value: "2" } });
+  fireEvent.change(screen.getByLabelText("To"), { target: { value: "5" } });
+  const newest = screen.getByRole("button", { name: /Time/ }).textContent;
+  await act(async () => {});
+  // One at a time: the second waits for the first.
+  expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1);
+  await act(async () => first.release());
+
+  expect(calls.filter((call) => call.method === "PUT")).toHaveLength(2);
+  expect(screen.getByRole("button", { name: /Time/ }).textContent).toBe(newest);
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+test("a filter change is sent at once if the page is hidden before it's saved", async () => {
+  const calls = serve({ "GET /api/state": LOGGED_IN, "GET /api/lists/my_segments": list() });
+  render(<App />);
+  await screen.findByRole("button", { name: /Often <Climb>/ });
+  fireEvent.click(screen.getByRole("button", { name: "Filter" }));
+  fireEvent.change(screen.getByLabelText("Segment contains"), { target: { value: "road" } });
+
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+  act(() => { window.dispatchEvent(new Event("pagehide")); });
+  vi.restoreAllMocks();
+
+  expect(calls).toContainEqual({
+    method: "PUT", path: "/api/lists/my_segments/filters", body: { filters: { name: "road" } }, keepalive: true,
+  });
+});
+
+test("logging out waits for a save already on its way", async () => {
+  const save = held({ ok: true });
+  const calls = serve({
+    "GET /api/state": LOGGED_IN,
+    "GET /api/lists/my_segments": list(),
+    "PUT /api/lists/my_segments/sort": save.route,
+  });
+  render(<App />);
+  await screen.findByRole("button", { name: /Often <Climb>/ });
+  fireEvent.click(screen.getByRole("button", { name: /Sort/ }));
+  fireEvent.click(within(screen.getByRole("dialog", { name: "Sort by" })).getByRole("button", { name: /Wind now/ }));
+
+  fireEvent.click(screen.getByRole("button", { name: "You" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Log out" }));
+  await act(async () => {});
+  expect(calls.some((call) => call.path === "/api/logout")).toBe(false);
+
+  await act(async () => save.release());
+  expect(calls.some((call) => call.path === "/api/logout")).toBe(true);
 });

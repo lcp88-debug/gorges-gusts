@@ -441,3 +441,15 @@ def test_a_second_rider_logging_in_on_the_same_browser_starts_with_no_range(sync
     session = session_contents(synced)
     assert session["athlete_id"] == 2002
     assert "time_ranges" not in session
+
+
+# The session cookie
+
+
+def test_a_status_check_does_not_send_the_cookie_back(synced):
+    """A reply that sends the cookie back could undo a logout or a time range saved while
+    it was on its way, so replies that change nothing in the session leave it alone."""
+    synced.put("/api/lists/my_segments/time-range", json={"start": hour(1), "end": hour(2)})
+
+    assert "set-cookie" not in synced.get("/api/state").headers
+    assert "set-cookie" not in synced.get("/api/lists/my_segments").headers
