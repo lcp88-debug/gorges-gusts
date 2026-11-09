@@ -227,6 +227,8 @@ def create_app(
                     for key, field_info in active_fields(settings.fastest_time).items()
                     if field_info.kind == "ticks"
                 },
+                # Menus open only on the page right after the rider used them.
+                "menu_used": request.session.pop("menu_used", None),
                 "filter_error": request.session.pop("filter_error", None),
                 "time_range": time_range,
                 "hour_options": hour_options(now),
@@ -343,6 +345,7 @@ def create_app(
         """
         form = await request.form()
         kind = str(form.get("list"))
+        request.session["menu_used"] = "filters"
         try:
             filters = parse_filter_form(
                 {key: str(value) for key, value in form.items()}, settings.fastest_time
@@ -363,6 +366,7 @@ def create_app(
     @app.post("/filters/clear")
     def clear_filters(request: Request, kind: str = Form(DEFAULT_LIST, alias="list")):
         """Clear-all: removes the list's filters (all the rider can see) and leaves its sort."""
+        request.session["menu_used"] = "filters"
 
         def change(chosen: ListSettings) -> None:
             chosen.filters = hidden_filters(chosen.filters, settings.fastest_time)
@@ -377,6 +381,7 @@ def create_app(
         end: str = Form(""),
     ):
         """The time range form: keeps the range for this visit, or changes nothing if it's bad."""
+        request.session["menu_used"] = "time_range"
         if kind not in LIST_KINDS:
             return _show_list(DEFAULT_LIST)
         athlete_id = request.session.get("athlete_id")
@@ -398,6 +403,7 @@ def create_app(
     @app.post("/timerange/clear")
     def clear_time_range(request: Request, kind: str = Form(DEFAULT_LIST, alias="list")):
         """Back to all 48 hours for this list."""
+        request.session["menu_used"] = "time_range"
         if kind not in LIST_KINDS:
             return _show_list(DEFAULT_LIST)
         ranges = dict(request.session.get("time_ranges", {}))

@@ -205,3 +205,12 @@ def test_a_second_rider_logging_in_on_the_same_browser_starts_with_no_range(sync
     session = session_contents(synced)
     assert session["athlete_id"] == 2002
     assert "time_ranges" not in session
+
+
+def test_the_time_range_menu_opens_only_right_after_it_is_used(synced, db):
+    set_range(synced, 3, 4)
+    assert '<details class="time-range" open>' in synced.get("/").text
+    assert '<details class="time-range" open>' not in synced.get("/").text
+
+    set_range(synced, 4, 3)  # An error opens it too.
+    assert '<details class="time-range" open>' in synced.get("/").text

@@ -171,3 +171,23 @@ def test_filters_compare_values_as_the_list_shows_them(synced, db):
     set_wind(db, {500: -2.6, 600: -3.4, 700: -2.4})  # Shown as −3%, −3% and −2%.
     filter_by(synced, wind_now_max="-3")
     assert order(synced.get("/").text) == [500, 600]
+
+
+def menu_open(page, menu):
+    return f'<details class="{menu}" open>' in page
+
+
+def test_the_filter_menu_opens_only_right_after_it_is_used(synced, db):
+    filter_by(synced, distance_min="1")
+    page = synced.get("/").text
+    assert menu_open(page, "filters") and "Filters (1 on)" in page
+
+    sort_by(synced, "distance")
+    page = synced.get("/").text
+    assert not menu_open(page, "filters") and "Filters (1 on)" in page
+
+    filter_by(synced, distance_min="soon")  # An error opens it too.
+    assert menu_open(synced.get("/").text, "filters")
+    synced.post("/filters/clear", data={"list": "my_segments"})
+    assert menu_open(synced.get("/").text, "filters")
+    assert not menu_open(synced.get("/").text, "filters")

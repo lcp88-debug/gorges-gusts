@@ -37,7 +37,7 @@
     {% endif %}
     {% if filter_error %}<p class="notice error" role="alert">{{ filter_error }}</p>{% endif %}
     {% if range_error %}<p class="notice error" role="alert">{{ range_error }}</p>{% endif %}
-    <details class="time-range"{% if time_range or range_error %} open{% endif %}>
+    <details class="time-range"{% if menu_used == "time_range" or range_error %} open{% endif %}>
       <summary>Time range{% if time_range %}: {{ time_range[0] | hour }} to {{ time_range[1] | hour }}{% else %}: all 48 hours{% endif %}</summary>
       <form method="post" action="/timerange">
         <input type="hidden" name="list" value="{{ list }}">
@@ -52,7 +52,7 @@
       <form method="post" action="/timerange/clear"><input type="hidden" name="list" value="{{ list }}"><button class="quiet">All 48 hours</button></form>
       <p class="muted">Best hour is chosen from inside this range. Wind now and the hours view always show everything.</p>
     </details>
-    <details class="filters"{% if filters or filter_error %} open{% endif %}>
+    <details class="filters"{% if menu_used == "filters" or filter_error %} open{% endif %}>
       <summary>Filters{% if filters %} ({{ filters | length }} on){% endif %}</summary>
       <form method="post" action="/filters">
         <input type="hidden" name="list" value="{{ list }}">
