@@ -11,6 +11,12 @@ from app.db import Database
 
 load_dotenv()
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "setting_off: run the page with the fastest-time setting off (test_fastest_time.py)"
+    )
+
+
 NOW = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
 ATHLETE = 1001
 OTHER_ATHLETE = 2002
@@ -161,7 +167,7 @@ def db():
     database = Database(os.environ["TEST_DATABASE_URL"])
     database.init_schema()
     with database.connect() as conn:
-        conn.execute("TRUNCATE athletes, rides, efforts, segments, sync_jobs, forecasts CASCADE")
+        conn.execute("TRUNCATE athletes, rides, efforts, segments, sync_jobs, forecasts, app_settings_seen CASCADE")
     return database
 
 

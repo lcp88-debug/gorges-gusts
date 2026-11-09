@@ -140,6 +140,26 @@ def test_the_range_resets_after_more_than_an_hour_away(synced, db):
     assert row_500(synced)["Best hour"].startswith("−10%")  # and it stays reset
 
 
+def test_a_range_set_after_a_long_time_away_is_kept(synced, db):
+    add_wind_numbers(db, 500, FIVE_HOURS)
+    set_last_seen(db, minutes_ago=120)  # The page was left open, then the rider came back.
+
+    synced.post("/timerange", data={"list": "my_segments", "start": hour(3), "end": hour(4)})
+
+    assert row_500(synced)["Best hour"].startswith("−2%")
+
+
+def test_coming_back_by_setting_a_range_still_resets_the_other_lists_range(synced, db):
+    add_wind_numbers(db, 500, FIVE_HOURS)
+    set_range(synced, 3, 4, list="explore")
+    set_last_seen(db, minutes_ago=120)
+
+    synced.post("/timerange", data={"list": "my_segments", "start": hour(3), "end": hour(4)})
+
+    assert row_500(synced, "explore")["Best hour"].startswith("−10%")
+    assert row_500(synced, "my_segments")["Best hour"].startswith("−2%")
+
+
 def test_the_range_can_be_put_back_to_all_48_hours(synced, db):
     add_wind_numbers(db, 500, FIVE_HOURS)
     set_range(synced, 3, 4)

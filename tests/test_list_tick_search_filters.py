@@ -1,5 +1,7 @@
 """Tick-box filters (climb category, town) and the name search, saved per rider and list."""
 
+from psycopg.types.json import Jsonb
+
 from tests.test_list_number_filters import filter_by
 from tests.test_list_sort import order, set_column, sort_by, synced  # noqa: F401 (fixtures)
 from tests.test_web import app, client, log_in  # noqa: F401 (fixtures)
@@ -39,6 +41,39 @@ def test_town_tick_boxes_list_only_towns_on_the_list(synced, db):
 
     assert 'name="town_Ithaca"' in page
     assert 'name="town_Dryden"' in page
+    assert 'name="town_Elmira"' not in page
+
+
+def save_town_ticks(db, towns):
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO list_settings (athlete_id, list_kind, sort_field, sort_direction, filters)
+            VALUES (1001, 'my_segments', 'your_attempts', 'desc', %s)
+            """,
+            (Jsonb({"town": towns}),),
+        )
+
+
+def test_a_ticked_town_no_longer_on_the_list_is_neither_shown_nor_applied(synced, db):
+    set_column(db, "town", {500: "Ithaca", 600: "Dryden", 700: None})
+    save_town_ticks(db, ["Elmira"])
+
+    page = synced.get("/").text
+
+    assert 'name="town_Elmira"' not in page
+    assert sorted(order(page)) == [500, 600, 700]
+    assert "Filters (" not in page  # Nothing counts as on.
+
+
+def test_ticked_towns_still_on_the_list_keep_applying_without_the_missing_one(synced, db):
+    set_column(db, "town", {500: "Ithaca", 600: "Dryden", 700: None})
+    save_town_ticks(db, ["Elmira", "Ithaca"])
+
+    page = synced.get("/").text
+
+    assert order(page) == [500]
+    assert 'name="town_Ithaca" checked' in page
     assert 'name="town_Elmira"' not in page
 
 

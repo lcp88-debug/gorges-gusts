@@ -6,8 +6,8 @@ from psycopg import sql
 
 from app.config import RIDE_WINDOW
 from app.db import delete_unused_segments
-from app.lists import parse_time
 from app.strava import NotFound, StravaClient
+from app.times import parse_time
 
 Progress = Callable[[str, int, int], None]
 
