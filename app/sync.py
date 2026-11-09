@@ -138,11 +138,15 @@ def _save_ride(conn: psycopg.Connection, athlete_id: int, activity: dict, now: d
 
 
 def read_overall_time(text: object) -> int | None:
-    """Strava's overall time text, such as "3:49" or "1:02:03", as seconds. Blank if unreadable."""
+    """Strava's overall time text, such as "3:49", "1:02:03" or "49s" for under a minute,
+    as seconds. Blank if unreadable."""
     if not isinstance(text, str):
         return None
+    text = text.strip()
+    if text.endswith("s") and text[:-1].isdigit():
+        return int(text[:-1])
     try:
-        return int(parse_time(text.strip()))
+        return int(parse_time(text))
     except ValueError:
         return None
 

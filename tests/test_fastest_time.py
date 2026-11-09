@@ -40,17 +40,18 @@ def stored_times(conn):
 
 
 def test_the_sync_stores_the_overall_fastest_time_when_the_setting_is_on(conn, fake):
-    fake.add_ride(1, [10, 20, 30])
+    fake.add_ride(1, [10, 20, 30, 40])
     fake.add_segment(10, "Short", xoms={"overall": "3:49", "kom": "9:99", "qom": "4:10"})
     fake.add_segment(20, "Long", xoms={"overall": "1:02:03"})
     fake.add_segment(30, "Unknown", xoms={})
+    fake.add_segment(40, "Sprint", xoms={"overall": "49s"})
 
     run_sync(conn, fake, ATHLETE, NOW, fastest_time=True)
 
-    assert stored_times(conn) == {10: 229, 20: 3723, 30: None}
+    assert stored_times(conn) == {10: 229, 20: 3723, 30: None, 40: 49}
 
 
-@pytest.mark.parametrize("text", ["--", "", "abc", "3:99", "1:2:3:4", "-3:00", None, 229])
+@pytest.mark.parametrize("text", ["--", "", "abc", "3:99", "1:2:3:4", "-3:00", "s", "-5s", None, 229])
 def test_text_that_cannot_be_read_becomes_blank(conn, fake, text):
     fake.add_ride(1, [10])
     fake.add_segment(10, "Odd", xoms={"overall": text})
