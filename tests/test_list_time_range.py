@@ -1,11 +1,13 @@
 """The time range: which hours best hour is chosen from, kept per list for the visit."""
 
+import base64
+import json
 from datetime import datetime, timedelta, timezone
 
 from app.main import saved_time_range
 from tests.conftest import table
 from tests.test_list_sort import order, synced  # noqa: F401 (fixtures)
-from tests.test_web import add_wind_numbers, app, client  # noqa: F401 (fixtures)
+from tests.test_web import add_wind_numbers, app, client, log_in  # noqa: F401 (fixtures)
 
 FIVE_HOURS = [4.0, 5.0, -10.0, 3.0, -2.0]
 
@@ -186,3 +188,20 @@ def test_a_range_that_has_ended_goes_back_to_all_48_hours():
     request = FakeRequest({"my_segments": [hour(-3), hour(-1)]})
 
     assert saved_time_range(request, "my_segments", datetime.now(timezone.utc)) is None
+
+
+def session_contents(client):
+    """The rider's session as the browser holds it (signed, but readable)."""
+    data = client.cookies["session"].split(".")[0]
+    return json.loads(base64.b64decode(data + "=" * (-len(data) % 4)))
+
+
+def test_a_second_rider_logging_in_on_the_same_browser_starts_with_no_range(synced, db):
+    set_range(synced, 3, 4)
+    assert "time_ranges" in session_contents(synced)
+
+    log_in(synced, athlete_id=2002)  # Rider A never logged out.
+
+    session = session_contents(synced)
+    assert session["athlete_id"] == 2002
+    assert "time_ranges" not in session

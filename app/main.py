@@ -280,6 +280,8 @@ def create_app(
                     (athlete_id,),
                 )
             enqueue_sync(conn, athlete_id)
+        # Start clean, so nothing from an earlier rider on this browser carries over.
+        request.session.clear()
         request.session["athlete_id"] = athlete_id
         return RedirectResponse("/", status_code=303)
 
