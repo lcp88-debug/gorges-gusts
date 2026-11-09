@@ -33,6 +33,7 @@ from app.lists import (
     parse_filter_form,
     parse_time_range,
     save_list_settings,
+    this_hour,
     tick_choices,
 )
 from app.maps import Maps
@@ -96,13 +97,21 @@ def _in_range(text: str, limits: tuple[int, int]) -> float | None:
     return value
 
 
-def saved_time_range(request: Request, kind: str):
-    """List `kind`'s time range kept in the rider's session, or None for all 48 hours."""
+def saved_time_range(request: Request, kind: str, now: datetime):
+    """List `kind`'s time range kept in the rider's session, or None for all 48 hours.
+
+    A visit can outlast its range. Hours already gone are left out, and a range that has
+    ended entirely goes back to all 48 hours rather than leaving best hour blank.
+    """
     try:
         first, last = request.session.get("time_ranges", {})[kind]
-        return datetime.fromisoformat(first), datetime.fromisoformat(last)
+        first, last = datetime.fromisoformat(first), datetime.fromisoformat(last)
     except (KeyError, TypeError, ValueError):
         return None
+    start = this_hour(now)
+    if last < start:
+        return None
+    return max(first, start), last
 
 
 def create_app(
@@ -176,7 +185,7 @@ def create_app(
                 enqueue_sync(conn, athlete_id)
                 job = _latest_job(conn, athlete_id)
             list_settings = load_list_settings(conn, athlete_id, kind, settings.fastest_time)
-            time_range = saved_time_range(request, kind)
+            time_range = saved_time_range(request, kind, now)
             # Tick boxes list the towns on the list before filtering.
             segments, whole_list, filters = build_list(
                 conn,

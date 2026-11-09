@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
+from app.main import saved_time_range
 from tests.conftest import table
 from tests.test_list_sort import order, synced  # noqa: F401 (fixtures)
 from tests.test_web import add_wind_numbers, app, client  # noqa: F401 (fixtures)
@@ -167,3 +168,21 @@ def test_the_range_can_be_put_back_to_all_48_hours(synced, db):
     synced.post("/timerange/clear", data={"list": "my_segments"})
 
     assert row_500(synced)["Best hour"].startswith("−10%")
+
+
+class FakeRequest:
+    def __init__(self, ranges):
+        self.session = {"time_ranges": ranges}
+
+
+def test_a_range_that_has_partly_passed_keeps_only_the_hours_to_come():
+    now = this_hour() + timedelta(minutes=30)
+    request = FakeRequest({"my_segments": [hour(-2), hour(3)]})
+
+    assert saved_time_range(request, "my_segments", now) == (this_hour(), this_hour() + timedelta(hours=3))
+
+
+def test_a_range_that_has_ended_goes_back_to_all_48_hours():
+    request = FakeRequest({"my_segments": [hour(-3), hour(-1)]})
+
+    assert saved_time_range(request, "my_segments", datetime.now(timezone.utc)) is None
