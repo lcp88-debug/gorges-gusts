@@ -20,7 +20,7 @@ ALTER TABLE athletes ADD COLUMN IF NOT EXISTS wind_started_at TIMESTAMPTZ;
 ALTER TABLE athletes ADD COLUMN IF NOT EXISTS wind_updated_at TIMESTAMPTZ;
 
 -- A rider's own choices for each list, not Strava data: kept until the rider is deleted.
--- Fields are named by the keys in app/lists.py FIELDS; unknown ones are ignored on load.
+-- Fields are named by the keys in web/src/rules/fields.json; unknown ones are ignored on load.
 -- filters holds one entry per filtered field, keyed the same way.
 CREATE TABLE IF NOT EXISTS list_settings (
     athlete_id     BIGINT NOT NULL REFERENCES athletes (id) ON DELETE CASCADE,

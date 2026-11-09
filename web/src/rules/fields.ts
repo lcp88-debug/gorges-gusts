@@ -1,5 +1,6 @@
 // The things shown about every segment on a list, how each is shown, sorted and filtered.
 
+import TABLE from "./fields.json";
 import { formatTime } from "./times";
 import type { Direction, Row, TickValue } from "./types";
 
@@ -37,57 +38,43 @@ export interface Field {
 
 const wind = (key: "wind_now" | "wind_best") => (row: Row) => row[key]?.percent ?? null;
 
-// The keys are saved in riders' list settings (and checked in app/lists.py), so think
-// twice before renaming one: a saved key that's no longer here is ignored.
-export const FIELDS: Record<string, Field> = {
-  name: { label: "Segment", kind: "search", firstClick: null, value: (row) => row.name },
-  town: { label: "Town", kind: "ticks", firstClick: null, value: (row) => row.town },
-  distance: {
-    label: "Distance", kind: "number", firstClick: "desc", value: (row) => row.distance_m,
-    perShownUnit: METERS_PER_MILE, shownDigits: 1, unit: "mi",
-  },
-  average_grade: {
-    label: "Avg grade", kind: "number", firstClick: "desc", value: (row) => row.average_grade,
-    shownDigits: 1, unit: "%",
-  },
-  steepest_grade: {
-    label: "Steepest grade", kind: "number", firstClick: "desc", value: (row) => row.maximum_grade,
-    shownDigits: 1, unit: "%",
-  },
-  elevation_gain: {
-    label: "Elevation gain", kind: "number", firstClick: "desc", value: (row) => row.elevation_gain_m,
-    perShownUnit: 1 / FEET_PER_METER, unit: "ft",
-  },
+type Key = keyof typeof TABLE.fields;
+
+// How each field in fields.json is shown and read. Its kind and first sort direction are
+// in fields.json, which the server checks saved choices against.
+const SHOWN: Record<Key, Omit<Field, "kind" | "firstClick">> = {
+  name: { label: "Segment", value: (row) => row.name },
+  town: { label: "Town", value: (row) => row.town },
+  distance: { label: "Distance", value: (row) => row.distance_m, perShownUnit: METERS_PER_MILE, shownDigits: 1, unit: "mi" },
+  average_grade: { label: "Avg grade", value: (row) => row.average_grade, shownDigits: 1, unit: "%" },
+  steepest_grade: { label: "Steepest grade", value: (row) => row.maximum_grade, shownDigits: 1, unit: "%" },
+  elevation_gain: { label: "Elevation gain", value: (row) => row.elevation_gain_m, perShownUnit: 1 / FEET_PER_METER, unit: "ft" },
   // Strava's 0 to 5, so biggest first is hardest first: HC, 1, 2, 3, 4, then none.
   climb_category: {
-    label: "Climb category", kind: "ticks", firstClick: "desc", value: (row) => row.climb_category,
+    label: "Climb category", value: (row) => row.climb_category,
     choices: CLIMB_CATEGORIES.map((label, value) => [value, label]),
   },
-  your_attempts: {
-    label: "Your attempts, 90 days", kind: "number", firstClick: "desc", value: (row) => row.recent_efforts,
-  },
+  your_attempts: { label: "Your attempts, 90 days", value: (row) => row.recent_efforts },
   // Seconds, fastest first. Blank for segments the rider hasn't attempted.
-  recent_best: {
-    label: "Recent best", kind: "number", firstClick: "asc", value: (row) => row.recent_best, isTime: true,
-  },
+  recent_best: { label: "Recent best", value: (row) => row.recent_best, isTime: true },
   // Most negative first: the biggest help from the wind.
-  wind_now: { label: "Wind now", kind: "number", firstClick: "asc", value: wind("wind_now"), unit: "%" },
-  best_hour: { label: "Best hour", kind: "number", firstClick: "asc", value: wind("wind_best"), unit: "%" },
-  people_on_strava: {
-    label: "People on Strava", kind: "number", firstClick: "desc", value: (row) => row.athlete_count,
-  },
-  total_attempts: {
-    label: "Total attempts", kind: "number", firstClick: "desc", value: (row) => row.effort_count,
-  },
+  wind_now: { label: "Wind now", value: wind("wind_now"), unit: "%" },
+  best_hour: { label: "Best hour", value: wind("wind_best"), unit: "%" },
+  people_on_strava: { label: "People on Strava", value: (row) => row.athlete_count },
+  total_attempts: { label: "Total attempts", value: (row) => row.effort_count },
   // Seconds, fastest first. Only exists while the fastest-time setting is on.
-  fastest_time: {
-    label: "Fastest time", kind: "number", firstClick: "asc", value: (row) => row.fastest_time_s ?? null,
-    isTime: true,
-  },
+  fastest_time: { label: "Fastest time", value: (row) => row.fastest_time_s ?? null, isTime: true },
 };
 
-// Fields that only exist while their app setting is on.
-const SETTING_FIELDS = new Set(["fastest_time"]);
+type TableEntry = { kind: Field["kind"]; firstClick: Direction | null; setting?: string };
+const ENTRIES = Object.entries(TABLE.fields) as [Key, TableEntry][];
+
+export const FIELDS: Record<string, Field> = Object.fromEntries(
+  ENTRIES.map(([key, { kind, firstClick }]) => [key, { kind, firstClick, ...SHOWN[key] }]),
+);
+
+// Fields that only exist while their app setting is on (only fastest time so far).
+const SETTING_FIELDS = new Set<string>(ENTRIES.filter(([, entry]) => entry.setting).map(([key]) => key));
 
 /** The fields a list has. Without the fastest-time setting, that field is absent. */
 export function activeFields(fastestTime: boolean): Record<string, Field> {

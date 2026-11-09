@@ -1,4 +1,5 @@
 // Segment times as riders read and type them: m:ss, or h:mm:ss for an hour or more.
+// The server reads the same format from Strava with its own parser (app/times.py).
 
 /** "m:ss" or "h:mm:ss" as seconds, or null for anything else. */
 export function parseTime(text: string): number | null {

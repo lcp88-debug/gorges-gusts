@@ -5,9 +5,11 @@ Sorting, filtering and choosing the best hour happen in the browser (web/src/rul
 ADR 0003). The server checks and stores what the rider chooses.
 """
 
+import json
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Literal
 
 import psycopg
@@ -23,38 +25,34 @@ Direction = Literal["asc", "desc"]
 FilterKind = Literal["number", "ticks", "search"]
 
 
+# The field table is shared with the app, so each rule exists once (ADR 0003).
+FIELD_TABLE = Path(__file__).resolve().parent.parent / "web" / "src" / "rules" / "fields.json"
+
+
 @dataclass(frozen=True)
 class Field:
     """One thing shown about every segment on a list: how it's filtered, and the direction
-    of the first sort on it (None if it can't be sorted). The browser's copy of these, with
-    labels and units, is web/src/rules/fields.ts."""
+    of the first sort on it (None if it can't be sorted). Read from FIELD_TABLE, where the
+    app also finds them; labels and units are in web/src/rules/fields.ts."""
 
     kind: FilterKind
     first_click: Direction | None
+    setting: str | None = None
 
 
-# The keys are saved in riders' list settings, so think twice before renaming one:
-# a saved key that's no longer here is ignored.
-FIELDS: dict[str, Field] = {
-    "name": Field("search", None),
-    "town": Field("ticks", None),
-    "distance": Field("number", "desc"),
-    "average_grade": Field("number", "desc"),
-    "steepest_grade": Field("number", "desc"),
-    "elevation_gain": Field("number", "desc"),
-    "climb_category": Field("ticks", "desc"),
-    "your_attempts": Field("number", "desc"),
-    "recent_best": Field("number", "asc"),
-    "wind_now": Field("number", "asc"),
-    "best_hour": Field("number", "asc"),
-    "people_on_strava": Field("number", "desc"),
-    "total_attempts": Field("number", "desc"),
-    # Only exists while the fastest-time setting is on.
-    "fastest_time": Field("number", "asc"),
-}
+def _read_fields() -> dict[str, Field]:
+    table = json.loads(FIELD_TABLE.read_text())["fields"]
+    return {
+        key: Field(entry["kind"], entry["firstClick"], entry.get("setting"))
+        for key, entry in table.items()
+    }
+
+
+# The keys are saved in riders' list settings: a saved key that's no longer here is ignored.
+FIELDS: dict[str, Field] = _read_fields()
 
 # Fields that only exist while their app setting is on.
-SETTING_FIELDS = {"fastest_time"}
+SETTING_FIELDS = {key for key, info in FIELDS.items() if info.setting}
 
 
 def active_fields(fastest_time: bool = False) -> dict[str, Field]:
