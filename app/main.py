@@ -193,8 +193,9 @@ def create_app(
         # Without a worker running, nothing is going to change.
         pending = start_worker and wind_pending(athlete, now)
         # The routine hourly update stays quiet, because reloading closes open hour views.
-        has_numbers = any(segment["wind_hours"] for segment in segments)
-        reload_for_wind = pending and bool(segments) and (athlete["wind_stale"] or not has_numbers)
+        # Judged on the whole list, so filters that hide every segment can't stop the reload.
+        has_numbers = any(segment["wind_hours"] for segment in whole_list)
+        reload_for_wind = pending and bool(whole_list) and (athlete["wind_stale"] or not has_numbers)
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -218,7 +219,7 @@ def create_app(
                 "time_range": time_range,
                 "hour_options": hour_options(now),
                 "range_error": request.session.pop("range_error", None),
-                "wind_pending": pending,
+                "wind_pending": pending and bool(whole_list),
                 "reload_for_wind": reload_for_wind,
                 "athlete": athlete,
                 "default_weight": DEFAULT_WEIGHT_KG,
