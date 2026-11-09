@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
+from app.api import api_router, latest_job as _latest_job, record_visit as _record_visit, saved_time_range
 from app.config import CACHE_TTL, Settings, load_settings
 from app.db import Database, note_fastest_time_setting
 from app.lists import (
@@ -45,7 +46,7 @@ from app.times import format_time
 from app.tokens import TokenStore
 from app.weather import fetch_forecasts
 from app.wind import DEFAULT_POWER_20MIN_W, DEFAULT_WEIGHT_KG
-from app.wind_updates import SEEN_RECENTLY, update_next_rider, wind_pending
+from app.wind_updates import update_next_rider, wind_pending
 from app.worker import Worker, enqueue_sync
 
 MPH_PER_MS = 2.23694
@@ -100,23 +101,6 @@ def _in_range(text: str, limits: tuple[int, int]) -> float | None:
     return value
 
 
-def saved_time_range(request: Request, kind: str, now: datetime):
-    """List `kind`'s time range kept in the rider's session, or None for all 48 hours.
-
-    A visit can outlast its range. Hours already gone are left out, and a range that has
-    ended entirely goes back to all 48 hours rather than leaving best hour blank.
-    """
-    try:
-        first, last = request.session.get("time_ranges", {})[kind]
-        first, last = datetime.fromisoformat(first), datetime.fromisoformat(last)
-    except (KeyError, TypeError, ValueError):
-        return None
-    start = this_hour(now)
-    if last < start:
-        return None
-    return max(first, start), last
-
-
 def create_app(
     settings: Settings | None = None,
     start_worker: bool = True,
@@ -155,6 +139,7 @@ def create_app(
         SessionMiddleware, secret_key=settings.session_secret, same_site="lax"
     )
     app.state.worker = worker
+    app.include_router(api_router(db, settings, lambda: start_worker))
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request, kind: str = Query(DEFAULT_LIST, alias="list")):
@@ -444,36 +429,6 @@ def create_app(
 
 def _show_list(kind: str) -> RedirectResponse:
     return RedirectResponse(f"/?list={kind}", status_code=303)
-
-
-def _record_visit(conn, request: Request, athlete_id: int, now: datetime) -> dict | None:
-    """Notes that the rider is using the app, and returns their row (None if they're gone).
-
-    A rider whose previous visit was more than an hour ago starts a new visit, which resets
-    their time ranges. So does a rider never seen before.
-    """
-    before = conn.execute(
-        "SELECT last_seen_at FROM athletes WHERE id = %s", (athlete_id,)
-    ).fetchone()
-    if before is None or before["last_seen_at"] is None or (
-        now - before["last_seen_at"] > SEEN_RECENTLY
-    ):
-        request.session.pop("time_ranges", None)
-    return conn.execute(
-        """
-        UPDATE athletes SET last_seen_at = %s WHERE id = %s
-        RETURNING last_synced_at, contributes, weight_kg, power_20min_w,
-                  wind_stale, wind_started_at, wind_updated_at
-        """,
-        (now, athlete_id),
-    ).fetchone()
-
-
-def _latest_job(conn, athlete_id: int) -> dict | None:
-    return conn.execute(
-        "SELECT * FROM sync_jobs WHERE athlete_id = %s ORDER BY created_at DESC, id DESC LIMIT 1",
-        (athlete_id,),
-    ).fetchone()
 
 
 def _login_failed(request: Request, message: str) -> RedirectResponse:

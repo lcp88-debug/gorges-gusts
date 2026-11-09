@@ -183,6 +183,22 @@ def save_list_settings(
     )
 
 
+def save_list_sort(
+    conn: psycopg.Connection, athlete_id: int, kind: str, sort_field: str, direction: Direction
+) -> None:
+    """Saves only the sort, leaving saved filters as they were."""
+    conn.execute(
+        """
+        INSERT INTO list_settings (athlete_id, list_kind, sort_field, sort_direction, filters)
+        VALUES (%s, %s, %s, %s, '{}')
+        ON CONFLICT (athlete_id, list_kind) DO UPDATE SET
+            sort_field = EXCLUDED.sort_field,
+            sort_direction = EXCLUDED.sort_direction
+        """,
+        (athlete_id, kind, sort_field, direction),
+    )
+
+
 def save_list_filters(
     conn: psycopg.Connection, athlete_id: int, kind: str, settings: ListSettings
 ) -> None:
@@ -619,18 +635,11 @@ def segment_list(
     ]
 
 
-def add_wind(
-    conn: psycopg.Connection,
-    athlete_id: int,
-    segments: list[dict],
-    now: datetime,
-    time_range: TimeRange | None = None,
-) -> None:
-    """Adds each segment's `wind_now`, `wind_best`, `wind_hours` and `less_certain`.
-
-    `wind_now` and `wind_hours` always cover every stored hour; only `wind_best` is limited
-    to the hours inside `time_range`.
-    """
+def wind_hours(
+    conn: psycopg.Connection, athlete_id: int, segments: list[dict], now: datetime
+) -> tuple[dict[int, list[dict]], set[int]]:
+    """Each segment's stored wind hours from this hour on, {segment id: rows in hour order},
+    and the ids of segments whose numbers are less certain."""
     start_hour = this_hour(now)
     ids = [segment["id"] for segment in segments]
     hours: dict[int, list[dict]] = {}
@@ -650,6 +659,23 @@ def add_wind(
             (ids,),
         )
     }
+    return hours, less_certain
+
+
+def add_wind(
+    conn: psycopg.Connection,
+    athlete_id: int,
+    segments: list[dict],
+    now: datetime,
+    time_range: TimeRange | None = None,
+) -> None:
+    """Adds each segment's `wind_now`, `wind_best`, `wind_hours` and `less_certain`.
+
+    `wind_now` and `wind_hours` always cover every stored hour; only `wind_best` is limited
+    to the hours inside `time_range`.
+    """
+    start_hour = this_hour(now)
+    hours, less_certain = wind_hours(conn, athlete_id, segments, now)
     for segment in segments:
         rows = hours.get(segment["id"], [])
         segment["wind_hours"] = rows
