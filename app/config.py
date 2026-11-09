@@ -1,9 +1,12 @@
+import logging
 import os
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+log = logging.getLogger(__name__)
 
 RIDE_WINDOW = timedelta(days=90)
 
@@ -29,6 +32,9 @@ class Settings:
 
 def load_settings() -> Settings:
     load_dotenv()
+    if "POOLED_MOST_POPULAR" in os.environ:
+        # Renamed in ADR 0001. The old name's value is not read.
+        log.warning("POOLED_MOST_POPULAR is no longer used and is ignored. Use POOLED_EXPLORE instead.")
     return Settings(
         database_url=os.environ["DATABASE_URL"],
         strava_client_id=os.environ["STRAVA_CLIENT_ID"],
