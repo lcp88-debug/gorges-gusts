@@ -494,7 +494,7 @@ def _parse_hour(text: str, what: str) -> datetime:
     except ValueError:
         raise TimeRangeError(f"The {what} of the time range isn't a time.") from None
     # A time with no zone is read as the server's local time, which the page shows hours in.
-    return moment.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    return this_hour(moment)
 
 
 def parse_time_range(start: str, end: str, now: datetime) -> TimeRange:
