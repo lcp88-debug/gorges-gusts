@@ -52,8 +52,8 @@
       <form method="post" action="/timerange/clear"><input type="hidden" name="list" value="{{ list }}"><button class="quiet">All 48 hours</button></form>
       <p class="muted">Best hour is chosen from inside this range. Wind now and the hours view always show everything.</p>
     </details>
-    <details class="filters"{% if list_settings.filters or filter_error %} open{% endif %}>
-      <summary>Filters{% if list_settings.filters %} ({{ list_settings.filters | length }} on){% endif %}</summary>
+    <details class="filters"{% if filters or filter_error %} open{% endif %}>
+      <summary>Filters{% if filters %} ({{ filters | length }} on){% endif %}</summary>
       <form method="post" action="/filters">
         <input type="hidden" name="list" value="{{ list }}">
         {% for key, boxes in filter_boxes.items() %}

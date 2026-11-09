@@ -11,6 +11,7 @@ from psycopg.types.json import Jsonb
 
 from app.config import RIDE_WINDOW
 from app.region import route_in_region
+from app.times import format_time, parse_time
 
 LIST_KINDS = ("my_segments", "explore")
 DEFAULT_LIST = "my_segments"
@@ -26,21 +27,29 @@ class Field:
     """One thing shown about every segment on a list.
 
     `kind` says how it will be filtered: "number" (a minimum and a maximum),
-    "ticks" (tick boxes) or "search". `first` is the direction of the first click
-    on its heading, or None for a field that can't be sorted. `value` reads it from
+    "ticks" (tick boxes) or "search". `first_click` is the direction of the first
+    click on its heading, or None for a field that can't be sorted. `value` reads it from
     a list row, giving None for a blank, which always sorts last.
 
     For a "number" field, `per_shown_unit` is how many of the row's units make one unit
     as the list shows it (1609.34 metres to a mile), and `is_time` means entries are typed
     as minutes and seconds and `value` is in seconds.
+
+    For a "ticks" field, `choices` are its fixed tick boxes as (stored value, label) pairs.
+    Without them, the boxes are the values found on the list (towns).
     """
 
     label: str
     kind: Literal["number", "ticks", "search"]
-    first: Direction | None
+    first_click: Direction | None
     value: Callable[[dict], object]
     per_shown_unit: float = 1.0
     is_time: bool = False
+    choices: tuple[tuple[object, str], ...] = ()
+
+
+# Strava's climb category 0 to 5 as the list shows it, so a category is its position here.
+CLIMB_CATEGORIES = ("none", "4", "3", "2", "1", "HC")
 
 
 def _wind(key: str) -> Callable[[dict], float | None]:
@@ -66,7 +75,11 @@ FIELDS: dict[str, Field] = {
     ),
     # Strava's 0 to 5, so biggest first is hardest first: HC, 1, 2, 3, 4, then none.
     "climb_category": Field(
-        "Climb category", "ticks", "desc", lambda row: row["climb_category"]
+        "Climb category",
+        "ticks",
+        "desc",
+        lambda row: row["climb_category"],
+        choices=tuple(enumerate(CLIMB_CATEGORIES)),
     ),
     "your_attempts": Field(
         "Your attempts, 90 days", "number", "desc", lambda row: row["recent_efforts"]
@@ -102,10 +115,6 @@ def active_fields(fastest_time: bool = False) -> dict[str, Field]:
 DEFAULT_SORTS = {"my_segments": "your_attempts", "explore": "people_on_strava"}
 
 
-# Strava's climb category 0 to 5 as the list shows it, so a category is its position here.
-CLIMB_CATEGORIES = ("none", "4", "3", "2", "1", "HC")
-
-
 @dataclass
 class ListSettings:
     """A rider's choices for one list. `filters` is {field key: filter}, see "Filters" below."""
@@ -117,7 +126,7 @@ class ListSettings:
 
 def default_settings(kind: str) -> ListSettings:
     sort_field = DEFAULT_SORTS[kind]
-    return ListSettings(sort_field, FIELDS[sort_field].first)
+    return ListSettings(sort_field, FIELDS[sort_field].first_click)
 
 
 def load_list_settings(
@@ -137,10 +146,10 @@ def load_list_settings(
     if row is None:
         return default_settings(kind)
     settings = ListSettings(
-        row["sort_field"], row["sort_direction"], clean_filters(row["filters"], fastest_time)
+        row["sort_field"], row["sort_direction"], clean_filters(row["filters"])
     )
     sort = active_fields(fastest_time).get(settings.sort_field)
-    if sort is None or sort.first is None or settings.sort_direction not in ("asc", "desc"):
+    if sort is None or sort.first_click is None or settings.sort_direction not in ("asc", "desc"):
         default = default_settings(kind)
         settings.sort_field, settings.sort_direction = default.sort_field, default.sort_direction
     return settings
@@ -191,26 +200,6 @@ class FilterKind:
     # Text for each box when the form is shown: {box name suffix: text}.
     # Ticks show {"ticked": [...]} and search {"text": ...}.
     show: Callable[[object, Field], dict[str, object]]
-
-
-def parse_time(text: str) -> float:
-    """"m:ss" or "h:mm:ss" as seconds."""
-    parts = text.split(":")
-    if len(parts) not in (2, 3) or not all(part.isdigit() for part in parts):
-        raise ValueError(text)
-    numbers = [int(part) for part in parts]
-    if numbers[-1] > 59 or (len(numbers) == 3 and numbers[1] > 59):
-        raise ValueError(text)
-    total = 0
-    for number in numbers:
-        total = total * 60 + number
-    return float(total)
-
-
-def format_time(seconds: float) -> str:
-    hours, rest = divmod(round(seconds), 3600)
-    minutes, secs = divmod(rest, 60)
-    return f"{hours}:{minutes:02}:{secs:02}" if hours else f"{minutes}:{secs:02}"
 
 
 def _parse_number(text: str, field_info: Field) -> float | None:
@@ -276,14 +265,14 @@ def _ticked_values(key: str, form: Mapping[str, str]) -> list[str]:
 
 
 def parse_ticks_filter(key: str, form: Mapping[str, str]) -> list | None:
+    field_info = FIELDS[key]
     values = _ticked_values(key, form)
-    if key == "climb_category":
-        categories = set()
+    if field_info.choices:
+        stored = {str(value): value for value, _label in field_info.choices}
         for value in values:
-            if value not in {str(number) for number in range(len(CLIMB_CATEGORIES))}:
-                raise FilterError(f"{FIELDS[key].label}: \u201c{value}\u201d isn't a category.")
-            categories.add(int(value))
-        return sorted(categories) or None
+            if value not in stored:
+                raise FilterError(f"{field_info.label}: \u201c{value}\u201d isn't a choice.")
+        values = [stored[value] for value in values]
     return sorted(set(values)) or None
 
 
@@ -318,13 +307,14 @@ def show_search_filter(saved: object, field_info: Field) -> dict[str, object]:
     return {"text": saved or ""}
 
 
-def tick_choices(key: str, rows: list[dict], saved: object) -> list[tuple[str, str]]:
-    """The tick boxes to show for a field: (value, label). Towns are only those in `rows`,
-    plus any still ticked from before so they can be unticked."""
-    if key == "climb_category":
-        return [(str(number), label) for number, label in enumerate(CLIMB_CATEGORIES)]
-    towns = {row[key] for row in rows if row[key]} | {str(value) for value in saved or []}
-    return [(town, town) for town in sorted(towns, key=str.lower)]
+def tick_choices(key: str, rows: list[dict]) -> list[tuple[str, str]]:
+    """The tick boxes to show for a field: (value as posted, label). Unless the field has
+    fixed choices, they're the values found in `rows`, so no box matches nothing."""
+    field_info = FIELDS[key]
+    if field_info.choices:
+        return [(str(value), label) for value, label in field_info.choices]
+    found = {field_info.value(row) for row in rows} - {None, ""}
+    return [(value, value) for value in sorted(found, key=str.lower)]
 
 
 # Add a kind here to make its fields filterable.
@@ -350,14 +340,17 @@ FILTER_KINDS: dict[str, FilterKind] = {
 }
 
 
-def clean_filters(saved: object, fastest_time: bool = False) -> dict:
-    """Saved filters without unknown fields or malformed entries."""
+def clean_filters(saved: object) -> dict:
+    """Saved filters without unknown fields or malformed entries.
+
+    Filters on a field whose setting is off are kept, so they're back when it's turned on;
+    filters_in_use leaves them out meanwhile.
+    """
     if not isinstance(saved, dict):
         return {}
     cleaned = {}
-    fields = active_fields(fastest_time)
     for key, value in saved.items():
-        field_info = fields.get(key)
+        field_info = FIELDS.get(key)
         kind = FILTER_KINDS.get(field_info.kind) if field_info else None
         if kind is not None:
             kept = kind.clean(value)
@@ -377,6 +370,33 @@ def parse_filter_form(form: Mapping[str, str], fastest_time: bool = False) -> di
     return filters
 
 
+def hidden_filters(filters: dict, fastest_time: bool = False) -> dict:
+    """The saved filters on fields whose setting is off. The form has no boxes for them, so
+    saving the form or clearing it keeps these as they were."""
+    fields = active_fields(fastest_time)
+    return {key: saved for key, saved in filters.items() if key not in fields}
+
+
+def filters_in_use(filters: dict, rows: list[dict], fastest_time: bool = False) -> dict:
+    """The saved filters that apply to a list whose segments before filtering are `rows`.
+
+    Filters on a field the list doesn't have (its setting is off) are left out, and so are
+    ticks with no box: a town that's no longer on the list. They stay saved all the same.
+    """
+    fields = active_fields(fastest_time)
+    in_use = {}
+    for key, saved in filters.items():
+        field_info = fields.get(key)
+        if field_info is None:
+            continue
+        if field_info.kind == "ticks":
+            boxes = {value for value, _label in tick_choices(key, rows)}
+            saved = [value for value in saved if str(value) in boxes] or None
+        if saved is not None:
+            in_use[key] = saved
+    return in_use
+
+
 def filter_boxes(filters: dict, fastest_time: bool = False) -> dict[str, dict[str, object]]:
     """For each filterable field, what to show in its boxes: {key: {"min": "", ...}}."""
     return {
@@ -386,15 +406,10 @@ def filter_boxes(filters: dict, fastest_time: bool = False) -> dict[str, dict[st
     }
 
 
-def filter_segments(
-    segments: list[dict], filters: dict, fastest_time: bool = False
-) -> list[dict]:
-    """The segments that pass every filter."""
-    fields = active_fields(fastest_time)
+def filter_segments(segments: list[dict], filters: dict) -> list[dict]:
+    """The segments that pass every filter in `filters` (see filters_in_use)."""
     for key, saved in filters.items():
-        field_info = fields.get(key)
-        if field_info is None:
-            continue  # Left over from a setting that's now off.
+        field_info = FIELDS[key]
         matches = FILTER_KINDS[field_info.kind].matches
         segments = [row for row in segments if matches(field_info.value(row), saved, field_info)]
     return segments
@@ -402,7 +417,7 @@ def filter_segments(
 
 def can_sort(field_key: str, fastest_time: bool = False) -> bool:
     fields = active_fields(fastest_time)
-    return field_key in fields and fields[field_key].first is not None
+    return field_key in fields and fields[field_key].first_click is not None
 
 
 def choose_sort(settings: ListSettings, field_key: str) -> None:
@@ -410,7 +425,7 @@ def choose_sort(settings: ListSettings, field_key: str) -> None:
     if field_key == settings.sort_field:
         settings.sort_direction = "asc" if settings.sort_direction == "desc" else "desc"
     else:
-        settings.sort_field, settings.sort_direction = field_key, FIELDS[field_key].first
+        settings.sort_field, settings.sort_direction = field_key, FIELDS[field_key].first_click
 
 
 def sort_segments(segments: list[dict], settings: ListSettings) -> list[dict]:
@@ -482,7 +497,8 @@ def build_list(
     """
     segments = segment_list(conn, athlete_id, kind, now, pooled)
     add_wind(conn, athlete_id, segments, now, time_range)
-    return sort_segments(filter_segments(segments, settings.filters, fastest_time), settings)
+    filters = filters_in_use(settings.filters, segments, fastest_time)
+    return sort_segments(filter_segments(segments, filters), settings)
 
 
 def has_missing_details(conn: psycopg.Connection, athlete_id: int) -> bool:
@@ -571,9 +587,9 @@ def add_wind(
         rows = hours.get(segment["id"], [])
         segment["wind_hours"] = rows
         segment["wind_now"] = next((row for row in rows if row["hour"] == start_hour), None)
-        in_range = rows
+        hours_in_range = rows
         if time_range is not None:
-            in_range = [row for row in rows if time_range[0] <= row["hour"] <= time_range[1]]
+            hours_in_range = [row for row in rows if time_range[0] <= row["hour"] <= time_range[1]]
         # min() keeps the earliest of equal hours.
-        segment["wind_best"] = min(in_range, key=lambda row: row["percent"], default=None)
+        segment["wind_best"] = min(hours_in_range, key=lambda row: row["percent"], default=None)
         segment["less_certain"] = segment["id"] in less_certain

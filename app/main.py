@@ -1,47 +1,51 @@
 import secrets
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import CACHE_TTL, Settings, load_settings
-from app.db import Database
+from app.db import Database, note_fastest_time_setting
 from app.lists import (
+    CLIMB_CATEGORIES,
     DEFAULT_LIST,
     FEET_PER_METER,
-    active_fields,
     LIST_KINDS,
     METERS_PER_MILE,
     FilterError,
+    ListSettings,
     TimeRangeError,
+    active_fields,
     build_list,
     can_sort,
     choose_sort,
-    CLIMB_CATEGORIES,
     filter_boxes,
+    filters_in_use,
     has_missing_details,
+    hidden_filters,
     hour_options,
     load_list_settings,
     parse_filter_form,
     parse_time_range,
+    save_list_settings,
     segment_list,
     tick_choices,
-    save_list_settings,
 )
 from app.maps import Maps
 from app.strava import REQUIRED_SCOPE, AuthExpired, RateLimiter, StravaClient, StravaOAuth
+from app.times import format_time
 from app.tokens import TokenStore
 from app.weather import fetch_forecasts
 from app.wind import DEFAULT_POWER_20MIN_W, DEFAULT_WEIGHT_KG
 from app.wind_updates import SEEN_RECENTLY, update_next_rider, wind_pending
 from app.worker import Worker, enqueue_sync
 
-# Strava's climb_category, 0 to 5, as riders know it.
 MPH_PER_MS = 2.23694
 WEIGHT_RANGE_KG = (30, 200)
 POWER_RANGE_W = (50, 600)
@@ -57,6 +61,7 @@ templates.env.filters["count"] = lambda value: "–" if value is None else f"{va
 templates.env.filters["feet"] = lambda meters: (
     "–" if meters is None else f"{meters * FEET_PER_METER:,.0f} ft"
 )
+# Strava's climb_category, 0 to 5, as riders know it.
 templates.env.filters["climb_category"] = lambda category: (
     CLIMB_CATEGORIES[category] if category in range(len(CLIMB_CATEGORIES)) else "–"
 )
@@ -68,7 +73,7 @@ def _wind_percent(percent: float) -> str:
     rounded = round(percent)
     if rounded == 0:
         return "0%"
-    return f"+{rounded}%" if rounded > 0 else f"\u2212{-rounded}%"
+    return f"+{rounded}%" if rounded > 0 else f"−{-rounded}%"
 
 
 def _hour(value: datetime) -> str:
@@ -76,16 +81,7 @@ def _hour(value: datetime) -> str:
     return f"{local:%a} {local.hour % 12 or 12}{'am' if local.hour < 12 else 'pm'}"
 
 
-def _duration(seconds: int | None) -> str:
-    """m:ss, or h:mm:ss for an hour or more."""
-    if seconds is None:
-        return "–"
-    hours, rest = divmod(seconds, 3600)
-    minutes, seconds = divmod(rest, 60)
-    return f"{hours}:{minutes:02}:{seconds:02}" if hours else f"{minutes}:{seconds:02}"
-
-
-templates.env.filters["duration"] = _duration
+templates.env.filters["duration"] = lambda seconds: "–" if seconds is None else format_time(seconds)
 templates.env.filters["wind_percent"] = _wind_percent
 templates.env.filters["hour"] = _hour
 templates.env.filters["mph"] = lambda speed: f"{speed * MPH_PER_MS:.0f} mph"
@@ -102,10 +98,10 @@ def _in_range(text: str, limits: tuple[int, int]) -> float | None:
     return value
 
 
-def saved_time_range(request: Request, list: str):
-    """The list's time range kept in the rider's session, or None for all 48 hours."""
+def saved_time_range(request: Request, kind: str):
+    """List `kind`'s time range kept in the rider's session, or None for all 48 hours."""
     try:
-        first, last = request.session.get("time_ranges", {})[list]
+        first, last = request.session.get("time_ranges", {})[kind]
         return datetime.fromisoformat(first), datetime.fromisoformat(last)
     except (KeyError, TypeError, ValueError):
         return None
@@ -136,6 +132,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         db.init_schema()
+        with db.connect() as conn:
+            note_fastest_time_setting(conn, settings.fastest_time)
         if start_worker:
             worker.start()
         yield
@@ -149,7 +147,7 @@ def create_app(
     app.state.worker = worker
 
     @app.get("/", response_class=HTMLResponse)
-    def home(request: Request, list: str = DEFAULT_LIST):
+    def home(request: Request, kind: str = Query(DEFAULT_LIST, alias="list")):
         athlete_id = request.session.get("athlete_id")
         if athlete_id is None:
             return templates.TemplateResponse(
@@ -160,27 +158,12 @@ def create_app(
                     "pooled": settings.pooled_explore,
                 },
             )
-        if list not in LIST_KINDS:
-            list = DEFAULT_LIST
+        if kind not in LIST_KINDS:
+            kind = DEFAULT_LIST
 
         now = datetime.now(timezone.utc)
         with db.connect() as conn:
-            # Read before it's updated: the time range resets after more than an hour away.
-            before = conn.execute(
-                "SELECT last_seen_at FROM athletes WHERE id = %s", (athlete_id,)
-            ).fetchone()
-            if before is None or before["last_seen_at"] is None or (
-                now - before["last_seen_at"] >= SEEN_RECENTLY
-            ):
-                request.session.pop("time_ranges", None)
-            athlete = conn.execute(
-                """
-                UPDATE athletes SET last_seen_at = %s WHERE id = %s
-                RETURNING last_synced_at, contributes, weight_kg, power_20min_w,
-                          wind_stale, wind_started_at, wind_updated_at
-                """,
-                (now, athlete_id),
-            ).fetchone()
+            athlete = _record_visit(conn, request, athlete_id, now)
             if athlete is None:
                 request.session.clear()
                 return RedirectResponse("/", status_code=303)
@@ -194,20 +177,21 @@ def create_app(
             if needs_sync and job is not None and job["status"] == "done":
                 enqueue_sync(conn, athlete_id)
                 job = _latest_job(conn, athlete_id)
-            list_settings = load_list_settings(conn, athlete_id, list, settings.fastest_time)
-            time_range = saved_time_range(request, list)
+            list_settings = load_list_settings(conn, athlete_id, kind, settings.fastest_time)
+            time_range = saved_time_range(request, kind)
             segments = build_list(
                 conn,
                 athlete_id,
-                list,
+                kind,
                 list_settings,
                 now,
                 pooled=settings.pooled_explore,
                 fastest_time=settings.fastest_time,
                 time_range=time_range,
             )
-            # Tick boxes list what is on the list before filtering, so a ticked town can be unticked.
-            whole_list = segment_list(conn, athlete_id, list, now, settings.pooled_explore)
+            # Tick boxes list the towns on the list before filtering.
+            whole_list = segment_list(conn, athlete_id, kind, now, settings.pooled_explore)
+            filters = filters_in_use(list_settings.filters, whole_list, settings.fastest_time)
 
         active = job is not None and job["status"] in ACTIVE_STATUSES
         # Without a worker running, nothing is going to change.
@@ -223,13 +207,14 @@ def create_app(
                 "active": active,
                 "show_lists": lists_ready or (job is not None and job["status"] == "done"),
                 "segments": segments,
-                "list": list,
+                "list": kind,
                 "fields": active_fields(settings.fastest_time),
                 "fastest_time": settings.fastest_time,
                 "list_settings": list_settings,
-                "filter_boxes": filter_boxes(list_settings.filters, settings.fastest_time),
+                "filters": filters,
+                "filter_boxes": filter_boxes(filters, settings.fastest_time),
                 "tick_choices": {
-                    key: tick_choices(key, whole_list, list_settings.filters.get(key))
+                    key: tick_choices(key, whole_list)
                     for key, field_info in active_fields(settings.fastest_time).items()
                     if field_info.kind == "ticks"
                 },
@@ -310,83 +295,96 @@ def create_app(
                 )
         return RedirectResponse("/", status_code=303)
 
-    @app.post("/sort")
-    def sort(request: Request, list: str = Form(DEFAULT_LIST), field: str = Form("")):
-        """A click on a field's heading. Anything unknown changes nothing."""
+    def change_list_settings(
+        request: Request, kind: str, change: Callable[[ListSettings], None] | None
+    ) -> RedirectResponse:
+        """Makes `change` to the rider's saved settings for list `kind`, then shows that list.
+
+        An unknown list, a logged-out visitor or no `change` changes nothing.
+        """
+        if kind not in LIST_KINDS:
+            return _show_list(DEFAULT_LIST)
         athlete_id = request.session.get("athlete_id")
-        if list not in LIST_KINDS:
-            list = DEFAULT_LIST
-        elif athlete_id is not None and can_sort(field, settings.fastest_time):
+        if athlete_id is not None and change is not None:
             with db.connect() as conn:
-                list_settings = load_list_settings(conn, athlete_id, list, settings.fastest_time)
-                choose_sort(list_settings, field)
-                save_list_settings(conn, athlete_id, list, list_settings)
-        return RedirectResponse(f"/?list={list}", status_code=303)
+                list_settings = load_list_settings(conn, athlete_id, kind, settings.fastest_time)
+                change(list_settings)
+                save_list_settings(conn, athlete_id, kind, list_settings)
+        return _show_list(kind)
+
+    @app.post("/sort")
+    def sort(request: Request, kind: str = Form(DEFAULT_LIST, alias="list"), field: str = Form("")):
+        """A click on a field's heading. Anything unknown changes nothing."""
+        if not can_sort(field, settings.fastest_time):
+            return change_list_settings(request, kind, None)
+        return change_list_settings(request, kind, lambda chosen: choose_sort(chosen, field))
 
     @app.post("/filters")
     async def set_filters(request: Request):
-        """The filter form: replaces the list's filters, or changes nothing if any entry is bad."""
+        """The filter form: replaces the list's filters, or changes nothing if any entry is bad.
+
+        Filters the form has no boxes for (their setting is off) stay as they were.
+        """
         form = await request.form()
-        list = form.get("list")
-        athlete_id = request.session.get("athlete_id")
-        if list not in LIST_KINDS:
-            return RedirectResponse(f"/?list={DEFAULT_LIST}", status_code=303)
-        if athlete_id is not None:
-            try:
-                filters = parse_filter_form(
-                    {key: str(value) for key, value in form.items()}, settings.fastest_time
-                )
-            except FilterError as error:
+        kind = str(form.get("list"))
+        try:
+            filters = parse_filter_form(
+                {key: str(value) for key, value in form.items()}, settings.fastest_time
+            )
+        except FilterError as error:
+            if kind in LIST_KINDS:
                 request.session["filter_error"] = f"{error} Nothing was changed."
-            else:
-                with db.connect() as conn:
-                    list_settings = load_list_settings(conn, athlete_id, list, settings.fastest_time)
-                    list_settings.filters = filters
-                    save_list_settings(conn, athlete_id, list, list_settings)
-        return RedirectResponse(f"/?list={list}", status_code=303)
+            return change_list_settings(request, kind, None)
+
+        def change(chosen: ListSettings) -> None:
+            chosen.filters = {**hidden_filters(chosen.filters, settings.fastest_time), **filters}
+
+        return change_list_settings(request, kind, change)
 
     @app.post("/filters/clear")
-    def clear_filters(request: Request, list: str = Form(DEFAULT_LIST)):
-        """Clear-all: removes the list's filters and leaves its sort alone."""
-        athlete_id = request.session.get("athlete_id")
-        if list not in LIST_KINDS:
-            list = DEFAULT_LIST
-        elif athlete_id is not None:
-            with db.connect() as conn:
-                list_settings = load_list_settings(conn, athlete_id, list, settings.fastest_time)
-                list_settings.filters = {}
-                save_list_settings(conn, athlete_id, list, list_settings)
-        return RedirectResponse(f"/?list={list}", status_code=303)
+    def clear_filters(request: Request, kind: str = Form(DEFAULT_LIST, alias="list")):
+        """Clear-all: removes the list's filters (all the rider can see) and leaves its sort."""
+
+        def change(chosen: ListSettings) -> None:
+            chosen.filters = hidden_filters(chosen.filters, settings.fastest_time)
+
+        return change_list_settings(request, kind, change)
 
     @app.post("/timerange")
     def set_time_range(
-        request: Request, list: str = Form(DEFAULT_LIST), start: str = Form(""), end: str = Form("")
+        request: Request,
+        kind: str = Form(DEFAULT_LIST, alias="list"),
+        start: str = Form(""),
+        end: str = Form(""),
     ):
         """The time range form: keeps the range for this visit, or changes nothing if it's bad."""
+        if kind not in LIST_KINDS:
+            return _show_list(DEFAULT_LIST)
         athlete_id = request.session.get("athlete_id")
-        if list not in LIST_KINDS:
-            list = DEFAULT_LIST
-        elif athlete_id is not None:
+        if athlete_id is not None:
+            now = datetime.now(timezone.utc)
+            # Setting a range is part of a visit, so the page it leads to mustn't reset it.
+            with db.connect() as conn:
+                _record_visit(conn, request, athlete_id, now)
             try:
-                first, last = parse_time_range(start, end, datetime.now(timezone.utc))
+                first, last = parse_time_range(start, end, now)
             except TimeRangeError as error:
                 request.session["range_error"] = f"{error} Nothing was changed."
             else:
                 ranges = dict(request.session.get("time_ranges", {}))
-                ranges[list] = [first.isoformat(), last.isoformat()]
+                ranges[kind] = [first.isoformat(), last.isoformat()]
                 request.session["time_ranges"] = ranges
-        return RedirectResponse(f"/?list={list}", status_code=303)
+        return _show_list(kind)
 
     @app.post("/timerange/clear")
-    def clear_time_range(request: Request, list: str = Form(DEFAULT_LIST)):
+    def clear_time_range(request: Request, kind: str = Form(DEFAULT_LIST, alias="list")):
         """Back to all 48 hours for this list."""
-        if list not in LIST_KINDS:
-            list = DEFAULT_LIST
-        else:
-            ranges = dict(request.session.get("time_ranges", {}))
-            ranges.pop(list, None)
-            request.session["time_ranges"] = ranges
-        return RedirectResponse(f"/?list={list}", status_code=303)
+        if kind not in LIST_KINDS:
+            return _show_list(DEFAULT_LIST)
+        ranges = dict(request.session.get("time_ranges", {}))
+        ranges.pop(kind, None)
+        request.session["time_ranges"] = ranges
+        return _show_list(kind)
 
     @app.post("/profile")
     def save_profile(request: Request, weight_kg: str = Form(""), power_20min_w: str = Form("")):
@@ -417,6 +415,33 @@ def create_app(
         return RedirectResponse("/", status_code=303)
 
     return app
+
+
+def _show_list(kind: str) -> RedirectResponse:
+    return RedirectResponse(f"/?list={kind}", status_code=303)
+
+
+def _record_visit(conn, request: Request, athlete_id: int, now: datetime) -> dict | None:
+    """Notes that the rider is using the app, and returns their row (None if they're gone).
+
+    A rider whose previous visit was more than an hour ago starts a new visit, which resets
+    their time ranges. So does a rider never seen before.
+    """
+    before = conn.execute(
+        "SELECT last_seen_at FROM athletes WHERE id = %s", (athlete_id,)
+    ).fetchone()
+    if before is None or before["last_seen_at"] is None or (
+        now - before["last_seen_at"] > SEEN_RECENTLY
+    ):
+        request.session.pop("time_ranges", None)
+    return conn.execute(
+        """
+        UPDATE athletes SET last_seen_at = %s WHERE id = %s
+        RETURNING last_synced_at, contributes, weight_kg, power_20min_w,
+                  wind_stale, wind_started_at, wind_updated_at
+        """,
+        (now, athlete_id),
+    ).fetchone()
 
 
 def _latest_job(conn, athlete_id: int) -> dict | None:

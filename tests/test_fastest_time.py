@@ -96,6 +96,49 @@ def test_nothing_about_who_set_the_time_is_stored(conn, fake):
     assert not {name for name in columns if "kom" in name or "holder" in name or "leader" in name}
 
 
+# Starting the app
+
+
+def start_app(settings, on):
+    """Starts and stops the app once, with the fastest-time setting on or off."""
+    with TestClient(create_app(replace(settings, fastest_time=on), start_worker=False)):
+        pass
+
+
+def test_starting_with_the_setting_off_blanks_stored_fastest_times(conn, fake, settings):
+    fake.add_ride(1, [10])
+    fake.add_segment(10, "Climb", xoms={"overall": "3:49"})
+    run_sync(conn, fake, ATHLETE, NOW, fastest_time=True)
+
+    start_app(settings, on=False)
+
+    assert stored_times(conn) == {10: None}
+
+
+def test_turning_the_setting_on_refetches_segment_details_once(conn, fake, settings):
+    fake.add_ride(1, [10])
+    fake.add_segment(10, "Climb", xoms={"overall": "3:49"})
+    start_app(settings, on=False)
+    run_sync(conn, fake, ATHLETE, NOW)
+    conn.execute("UPDATE athletes SET last_synced_at = %s, wind_stale = FALSE", (NOW,))
+
+    start_app(settings, on=True)
+
+    assert stored_times(conn) == {}
+    athlete = conn.execute(
+        "SELECT last_synced_at, wind_stale FROM athletes WHERE id = %s", (ATHLETE,)
+    ).fetchone()
+    assert athlete == {"last_synced_at": None, "wind_stale": True}
+    # The next sync fills it in from the rides still cached, without fetching them again.
+    fake.calls.clear()
+    run_sync(conn, fake, ATHLETE, NOW, fastest_time=True)
+    assert stored_times(conn) == {10: 229}
+    assert fake.calls == ["list", "segment:10"]
+
+    start_app(settings, on=True)  # Already on: nothing more is cleared.
+    assert stored_times(conn) == {10: 229}
+
+
 def test_overall_time_text_is_read_as_seconds():
     assert read_overall_time(" 3:49 ") == 229
     assert read_overall_time("1:02:03") == 3723
@@ -178,3 +221,26 @@ def test_a_saved_fastest_time_filter_and_sort_are_ignored_while_it_is_off(synced
     assert sorted(order(synced.get("/").text)) == [500, 600, 700]
     assert "aria-sort" in synced.get("/").text
     assert 'name="fastest_time_max"' not in synced.get("/").text
+
+
+@setting_off
+def test_a_saved_fastest_time_filter_is_kept_when_other_settings_are_saved_while_off(synced, db):
+    set_column(db, "fastest_time_s", {500: 300, 600: 200, 700: None})
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO list_settings (athlete_id, list_kind, sort_field, sort_direction, filters)
+            VALUES (1001, 'my_segments', 'distance', 'desc', '{"fastest_time": {"max": 250}}')
+            """
+        )
+
+    sort_by(synced, "average_grade")
+    filter_by(synced, name_search="i")
+    page = synced.get("/").text
+    synced.post("/filters/clear", data={"list": "my_segments"})
+
+    assert sorted(order(page)) == [500, 700]  # Only the name search applies.
+    assert "Filters (1 on)" in page
+    with db.connect() as conn:
+        saved = conn.execute("SELECT filters FROM list_settings").fetchone()["filters"]
+    assert saved == {"fastest_time": {"max": 250}}

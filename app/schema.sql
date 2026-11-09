@@ -31,6 +31,13 @@ CREATE TABLE IF NOT EXISTS list_settings (
     PRIMARY KEY (athlete_id, list_kind)
 );
 
+-- Whether each app setting was on at the last startup, to notice one being turned on
+-- (see note_fastest_time_setting in app/db.py). Not Strava data.
+CREATE TABLE IF NOT EXISTS app_settings_seen (
+    name  TEXT PRIMARY KEY,
+    is_on BOOLEAN NOT NULL
+);
+
 -- Strava data: every row carries fetched_at and is purged after CACHE_TTL.
 CREATE TABLE IF NOT EXISTS rides (
     id         BIGINT PRIMARY KEY,
