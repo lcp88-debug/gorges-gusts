@@ -9,7 +9,7 @@ from app.lists import wind_hours
 from app.region import in_region
 from app.weather import WeatherUnavailable, grid_point
 from app.wind import Wind
-from app.wind_updates import update_next_rider, wind_pending
+from app.wind_updates import update_next_rider, wind_awaited, wind_pending
 from tests.conftest import ATHLETE, NOW, OTHER_ATHLETE, encode_route
 
 THIS_HOUR = NOW.replace(minute=0, second=0, microsecond=0)
@@ -307,3 +307,16 @@ class TestWindPending:
     def test_a_run_that_died_stops_counting(self):
         started = NOW + timedelta(minutes=1)
         assert not wind_pending(self.row(started=started), started + timedelta(minutes=11))
+
+
+class TestWindAwaited:
+    def row(self, stale=False, updated=NOW):
+        return {"wind_stale": stale, "wind_started_at": updated, "wind_updated_at": updated}
+
+    def test_the_hourly_update_is_not_awaited(self):
+        assert not wind_awaited(self.row(), NOW + timedelta(hours=2))
+
+    def test_numbers_the_rider_cant_see_yet_are_awaited(self):
+        assert wind_awaited(self.row(stale=True), NOW)
+        assert wind_awaited(self.row(updated=None), NOW)
+        assert wind_awaited(self.row(), NOW + timedelta(hours=48))

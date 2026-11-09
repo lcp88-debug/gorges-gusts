@@ -31,7 +31,7 @@ from app.lists import (
     wind_hours,
 )
 from app.wind import DEFAULT_POWER_20MIN_W, DEFAULT_WEIGHT_KG
-from app.wind_updates import SEEN_RECENTLY, wind_pending
+from app.wind_updates import SEEN_RECENTLY, wind_awaited, wind_pending
 from app.worker import enqueue_sync
 
 ACTIVE_STATUSES = ("pending", "running", "paused")
@@ -157,7 +157,8 @@ def api_router(db: Database, settings: Settings, worker_running: Callable[[], bo
     def state(request: Request):
         """Who's logged in, how their data is doing, and their profile.
 
-        The app asks again every few seconds while `busy`, and reloads its lists when
+        The app asks again every few seconds while `busy` (Strava data coming in, or wind
+        numbers the rider is waiting for), and reloads its lists when
         `lists_version` changes.
         """
         athlete_id = rider(request)
@@ -185,8 +186,11 @@ def api_router(db: Database, settings: Settings, worker_running: Callable[[], bo
                 job = latest_job(conn, athlete_id)
 
         active = job is not None and job["status"] in ACTIVE_STATUSES
-        # Without a worker running, nothing is going to change.
-        pending = worker_running() and wind_pending(athlete, now)
+        # Without a worker running, nothing is going to change. The routine hourly update
+        # isn't worth checking for every few seconds: the app's slower check picks it up.
+        working = worker_running()
+        pending = working and wind_pending(athlete, now)
+        awaited = working and wind_awaited(athlete, now)
         return {
             "logged_in": True,
             "pooled": settings.pooled_explore,
@@ -196,7 +200,7 @@ def api_router(db: Database, settings: Settings, worker_running: Callable[[], bo
             "show_lists": lists_ready or (job is not None and job["status"] == "done"),
             "last_synced_at": _iso(synced),
             "wind_pending": pending,
-            "busy": active or pending,
+            "busy": active or awaited,
             "lists_version": f"{_iso(synced)}|{_iso(athlete['wind_updated_at'])}",
             "this_hour": _iso(this_hour(now)),
             "profile": {

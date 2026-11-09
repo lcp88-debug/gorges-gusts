@@ -194,6 +194,14 @@ def wind_pending(row: dict, now: datetime) -> bool:
     return started is not None and started > updated and now - started < STUCK_AFTER
 
 
+def wind_awaited(row: dict, now: datetime) -> bool:
+    """Whether the rider is waiting for wind numbers they can't see yet, rather than for the
+    routine hourly update: never worked out, changed by a profile save, or all in the past
+    after time away (see wind_pending)."""
+    updated = row["wind_updated_at"]
+    return bool(row["wind_stale"]) or updated is None or now - updated >= timedelta(hours=FORECAST_HOURS)
+
+
 def update_next_rider(
     conn: psycopg.Connection, maps: Maps, fetch: FetchForecasts, now: datetime, pooled: bool
 ) -> bool:

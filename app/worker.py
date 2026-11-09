@@ -57,6 +57,10 @@ class Worker:
         self._thread = threading.Thread(target=self._loop, name="sync-worker", daemon=True)
         self._thread.start()
 
+    def running(self) -> bool:
+        """Whether the worker's thread is alive, so queued work will get done."""
+        return self._thread is not None and self._thread.is_alive()
+
     def stop(self) -> None:
         self._stop.set()
         if self._thread:

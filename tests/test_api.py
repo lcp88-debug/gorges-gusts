@@ -83,6 +83,29 @@ def test_lists_version_changes_when_the_wind_is_updated(synced, db):
     assert synced.get("/api/state").json()["lists_version"] != before
 
 
+def test_the_hourly_wind_update_is_not_busy_but_awaited_numbers_are(app, synced, db):
+    app.state.worker.running = lambda: True
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE athletes SET wind_stale = FALSE, wind_updated_at = now() - interval '2 hours'"
+        )
+    state = synced.get("/api/state").json()
+    assert state["wind_pending"] and not state["busy"]
+
+    with db.connect() as conn:
+        conn.execute("UPDATE athletes SET wind_stale = TRUE")
+    assert synced.get("/api/state").json()["busy"]
+
+
+def test_a_dead_worker_is_never_busy_with_wind(app, synced, db):
+    with db.connect() as conn:
+        conn.execute("UPDATE athletes SET wind_stale = TRUE")
+
+    state = synced.get("/api/state").json()
+
+    assert not state["wind_pending"] and not state["busy"]
+
+
 # Lists
 
 
