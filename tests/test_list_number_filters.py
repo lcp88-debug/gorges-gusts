@@ -152,3 +152,15 @@ def test_unknown_saved_filters_are_ignored(synced, db):
 def test_filtering_needs_a_login(client, db):
     assert filter_by(client, distance_min="1").status_code == 303
     assert client.post("/filters/clear", data={"list": "explore"}).status_code == 303
+
+
+def test_filters_compare_values_as_the_list_shows_them(synced, db):
+    # Shown as 1.0 mi, 0.9 mi and 1.1 mi.
+    set_column(db, "distance_m", {500: 1580.0, 600: 1450.0, 700: 1770.0})
+    filter_by(synced, distance_min="1", distance_max="1")
+    assert order(synced.get("/").text) == [500]
+
+    filter_by(synced)
+    set_wind(db, {500: -2.6, 600: -3.4, 700: -2.4})  # Shown as −3%, −3% and −2%.
+    filter_by(synced, wind_now_max="-3")
+    assert order(synced.get("/").text) == [500, 600]

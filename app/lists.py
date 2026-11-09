@@ -32,8 +32,10 @@ class Field:
     a list row, giving None for a blank, which always sorts last.
 
     For a "number" field, `per_shown_unit` is how many of the row's units make one unit
-    as the list shows it (1609.34 metres to a mile), and `is_time` means entries are typed
-    as minutes and seconds and `value` is in seconds.
+    as the list shows it (1609.34 metres to a mile), `shown_digits` is how many decimal
+    places the list shows, and `is_time` means entries are typed as minutes and seconds
+    and `value` is in seconds. Filters compare the value as shown, so a segment shown as
+    "1.0 mi" passes "at least 1".
 
     For a "ticks" field, `choices` are its fixed tick boxes as (stored value, label) pairs.
     Without them, the boxes are the values found on the list (towns).
@@ -44,6 +46,7 @@ class Field:
     first_click: Direction | None
     value: Callable[[dict], object]
     per_shown_unit: float = 1.0
+    shown_digits: int = 0
     is_time: bool = False
     choices: tuple[tuple[object, str], ...] = ()
 
@@ -62,10 +65,19 @@ FIELDS: dict[str, Field] = {
     "name": Field("Segment", "search", None, lambda row: row["name"]),
     "town": Field("Town", "ticks", None, lambda row: row["town"]),
     "distance": Field(
-        "Distance", "number", "desc", lambda row: row["distance_m"], per_shown_unit=METERS_PER_MILE
+        "Distance",
+        "number",
+        "desc",
+        lambda row: row["distance_m"],
+        per_shown_unit=METERS_PER_MILE,
+        shown_digits=1,
     ),
-    "average_grade": Field("Avg grade", "number", "desc", lambda row: row["average_grade"]),
-    "steepest_grade": Field("Steepest grade", "number", "desc", lambda row: row["maximum_grade"]),
+    "average_grade": Field(
+        "Avg grade", "number", "desc", lambda row: row["average_grade"], shown_digits=1
+    ),
+    "steepest_grade": Field(
+        "Steepest grade", "number", "desc", lambda row: row["maximum_grade"], shown_digits=1
+    ),
     "elevation_gain": Field(
         "Elevation gain",
         "number",
@@ -243,7 +255,7 @@ def clean_number_filter(saved: object) -> dict | None:
 def number_matches(value: object, bounds: dict, field_info: Field) -> bool:
     if value is None:
         return False  # A blank can't be said to be within the limits.
-    shown = round(value / field_info.per_shown_unit, 6)
+    shown = round(value / field_info.per_shown_unit, field_info.shown_digits)
     return bounds.get("min", -math.inf) <= shown <= bounds.get("max", math.inf)
 
 
