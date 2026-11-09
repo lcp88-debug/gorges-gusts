@@ -63,7 +63,7 @@ def create_app(
         SessionMiddleware, secret_key=settings.session_secret, same_site="lax"
     )
     app.state.worker = worker
-    app.include_router(api_router(db, settings, lambda: start_worker))
+    app.include_router(api_router(db, settings, lambda: worker.running()))
 
     @app.get("/", response_class=HTMLResponse)
     def home():
@@ -73,9 +73,20 @@ def create_app(
             return HTMLResponse(NOT_BUILT, status_code=503)
         return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
-    if (web_build / "assets").is_dir():
-        # File names carry a hash of their contents, so a new build never reuses one.
-        app.mount("/assets", StaticFiles(directory=web_build / "assets"), name="assets")
+    class BuiltAssets(StaticFiles):
+        """The build's scripts and styles. Their folder may not exist until the first build,
+        and building while the server runs needs no restart."""
+
+        async def __call__(self, scope, receive, send):
+            if not (web_build / "assets").is_dir():
+                await HTMLResponse("Not found", status_code=404)(scope, receive, send)
+                return
+            await super().__call__(scope, receive, send)
+
+    # File names carry a hash of their contents, so a new build never reuses one.
+    app.mount(
+        "/assets", BuiltAssets(directory=web_build / "assets", check_dir=False), name="assets"
+    )
 
     @app.get("/login")
     def login(request: Request):

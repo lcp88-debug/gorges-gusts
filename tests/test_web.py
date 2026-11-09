@@ -26,6 +26,14 @@ def test_the_page_is_the_built_react_app(db, settings, tmp_path):
         assert client.get("/assets/app.js").text == "console.log(1)"
 
 
+def test_a_build_made_after_the_server_started_is_served(db, settings, tmp_path):
+    with TestClient(create_app(settings, start_worker=False, web_build=tmp_path)) as client:
+        assert client.get("/assets/app.js").status_code == 404
+        (tmp_path / "assets").mkdir()
+        (tmp_path / "assets" / "app.js").write_text("console.log(1)")
+        assert client.get("/assets/app.js").text == "console.log(1)"
+
+
 def test_without_a_build_the_page_says_how_to_make_one(db, settings, tmp_path):
     with TestClient(create_app(settings, start_worker=False, web_build=tmp_path)) as client:
         page = client.get("/")
