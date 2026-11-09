@@ -1,5 +1,7 @@
 """Minimum and maximum filters on number fields, saved per rider and per list."""
 
+import re
+
 import pytest
 
 from tests.test_list_fields import set_attempt_times
@@ -8,8 +10,13 @@ from tests.test_web import app, client, log_in  # noqa: F401 (fixtures)
 
 
 def filter_by(client, list="my_segments", **entries):
-    """Submits the filter form. Keys look like distance_min="1" (other boxes left out)."""
-    return client.post("/filters", data={"list": list, **entries})
+    """Submits the filter form. Keys look like distance_min="1" (other boxes left out).
+
+    Like a browser, it also sends the hidden marker of each tick box the page shows.
+    """
+    page = client.get(f"/?list={list}").text
+    shown = {name: "" for name in re.findall(r'name="(shown_[^"]+)"', page)}
+    return client.post("/filters", data={"list": list, **shown, **entries})
 
 
 def test_a_minimum_keeps_only_segments_at_or_above_it(synced, db):

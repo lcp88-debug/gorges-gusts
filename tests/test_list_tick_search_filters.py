@@ -77,6 +77,35 @@ def test_ticked_towns_still_on_the_list_keep_applying_without_the_missing_one(sy
     assert 'name="town_Elmira"' not in page
 
 
+def saved_town_ticks(db):
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT filters FROM list_settings WHERE athlete_id = 1001 AND list_kind = 'my_segments'"
+        ).fetchone()
+    return row["filters"].get("town")
+
+
+def test_saving_the_form_keeps_a_ticked_town_that_has_no_box(synced, db):
+    set_column(db, "town", {500: "Ithaca", 600: "Dryden", 700: None})
+    save_town_ticks(db, ["Elmira", "Ithaca"])
+
+    filter_by(synced, town_Dryden="on", name_search="o")  # Ithaca unticked, Elmira has no box.
+
+    assert saved_town_ticks(db) == ["Dryden", "Elmira"]
+    with db.connect() as conn:  # Elmira is back on the list, still ticked.
+        conn.execute("UPDATE segments SET town = 'Elmira' WHERE id = 700")
+    assert 'name="town_Elmira" checked' in synced.get("/").text
+
+
+def test_clearing_filters_drops_a_ticked_town_that_has_no_box(synced, db):
+    set_column(db, "town", {500: "Ithaca", 600: "Dryden", 700: None})
+    save_town_ticks(db, ["Elmira"])
+
+    synced.post("/filters/clear", data={"list": "my_segments"})
+
+    assert saved_town_ticks(db) is None
+
+
 def test_ticking_towns_keeps_only_those_towns_and_drops_blanks(synced, db):
     set_column(db, "town", {500: "Ithaca", 600: "Dryden", 700: None})
 

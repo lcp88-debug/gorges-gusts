@@ -22,6 +22,7 @@ from app.lists import (
     ListSettings,
     TimeRangeError,
     active_fields,
+    boxless_ticks,
     build_list,
     can_sort,
     choose_sort,
@@ -30,6 +31,7 @@ from app.lists import (
     hidden_filters,
     hour_options,
     load_list_settings,
+    merge_ticks,
     parse_filter_form,
     parse_time_range,
     save_list_filters,
@@ -336,7 +338,8 @@ def create_app(
     async def set_filters(request: Request):
         """The filter form: replaces the list's filters, or changes nothing if any entry is bad.
 
-        Filters the form has no boxes for (their setting is off) stay as they were.
+        Filters the form has no boxes for (their setting is off) stay as they were, and so
+        do saved ticks it had no box for (a town that's off the list for now).
         """
         form = await request.form()
         kind = str(form.get("list"))
@@ -350,7 +353,10 @@ def create_app(
             return change_list_settings(request, kind, None)
 
         def change(chosen: ListSettings) -> None:
-            chosen.filters = {**hidden_filters(chosen.filters, settings.fastest_time), **filters}
+            boxless = boxless_ticks(chosen.filters, form, settings.fastest_time)
+            chosen.filters = merge_ticks(
+                {**hidden_filters(chosen.filters, settings.fastest_time), **filters}, boxless
+            )
 
         return change_list_settings(request, kind, change, save_list_filters)
 

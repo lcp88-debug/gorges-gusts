@@ -404,11 +404,41 @@ def hidden_filters(filters: dict, fastest_time: bool = False) -> dict:
     return {key: saved for key, saved in filters.items() if key not in fields}
 
 
+# Each tick box shown also posts a hidden `shown_<key>_<value>`, so saving the form can tell
+# a box the rider unticked from a saved tick that had no box.
+SHOWN_PREFIX = "shown_"
+
+
+def boxless_ticks(
+    filters: dict, form: Mapping[str, str], fastest_time: bool = False
+) -> dict[str, list]:
+    """The saved ticks the submitted form had no box for: {key: [value, ...]}."""
+    kept = {}
+    for key, field_info in active_fields(fastest_time).items():
+        # Fixed choices always have every box.
+        if field_info.kind != "ticks" or field_info.choices or key not in filters:
+            continue
+        shown = set(_ticked_values(f"{SHOWN_PREFIX}{key}", form))
+        values = [value for value in filters[key] if str(value) not in shown]
+        if values:
+            kept[key] = values
+    return kept
+
+
+def merge_ticks(filters: dict, boxless: dict[str, list]) -> dict:
+    """`filters` with the boxless ticks added back."""
+    merged = dict(filters)
+    for key, values in boxless.items():
+        merged[key] = sorted(set(merged.get(key, [])) | set(values), key=str)
+    return merged
+
+
 def filters_in_use(filters: dict, rows: list[dict], fastest_time: bool = False) -> dict:
     """The saved filters that apply to a list whose segments before filtering are `rows`.
 
     Filters on a field the list doesn't have (its setting is off) are left out, and so are
-    ticks with no box: a town that's no longer on the list. They stay saved all the same.
+    ticks with no box: a town that's no longer on the list. They stay saved all the same,
+    including when the form is saved (see boxless_ticks), until the rider clears filters.
     """
     fields = active_fields(fastest_time)
     in_use = {}

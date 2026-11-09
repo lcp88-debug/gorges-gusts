@@ -68,6 +68,7 @@
           <div><span>{{ fields[key].label }}</span>
             {% for value, label in tick_choices[key] %}
               <label><input type="checkbox" name="{{ key }}_{{ value }}" {% if value in boxes.ticked %}checked{% endif %}> {{ label }}</label>
+              <input type="hidden" name="shown_{{ key }}_{{ value }}" value="">
             {% else %}
               <em>none on this list</em>
             {% endfor %}
