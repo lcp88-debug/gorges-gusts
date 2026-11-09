@@ -32,6 +32,7 @@ from app.lists import (
     load_list_settings,
     parse_filter_form,
     parse_time_range,
+    save_list_filters,
     save_list_settings,
     this_hour,
     tick_choices,
@@ -302,9 +303,13 @@ def create_app(
         return RedirectResponse("/", status_code=303)
 
     def change_list_settings(
-        request: Request, kind: str, change: Callable[[ListSettings], None] | None
+        request: Request,
+        kind: str,
+        change: Callable[[ListSettings], None] | None,
+        save: Callable[..., None] = save_list_settings,
     ) -> RedirectResponse:
-        """Makes `change` to the rider's saved settings for list `kind`, then shows that list.
+        """Makes `change` to the rider's saved settings for list `kind`, saves them with
+        `save`, then shows that list.
 
         An unknown list, a logged-out visitor or no `change` changes nothing.
         """
@@ -315,7 +320,7 @@ def create_app(
             with db.connect() as conn:
                 list_settings = load_list_settings(conn, athlete_id, kind, settings.fastest_time)
                 change(list_settings)
-                save_list_settings(conn, athlete_id, kind, list_settings)
+                save(conn, athlete_id, kind, list_settings)
         return _show_list(kind)
 
     @app.post("/sort")
@@ -345,7 +350,7 @@ def create_app(
         def change(chosen: ListSettings) -> None:
             chosen.filters = {**hidden_filters(chosen.filters, settings.fastest_time), **filters}
 
-        return change_list_settings(request, kind, change)
+        return change_list_settings(request, kind, change, save_list_filters)
 
     @app.post("/filters/clear")
     def clear_filters(request: Request, kind: str = Form(DEFAULT_LIST, alias="list")):
@@ -354,7 +359,7 @@ def create_app(
         def change(chosen: ListSettings) -> None:
             chosen.filters = hidden_filters(chosen.filters, settings.fastest_time)
 
-        return change_list_settings(request, kind, change)
+        return change_list_settings(request, kind, change, save_list_filters)
 
     @app.post("/timerange")
     def set_time_range(

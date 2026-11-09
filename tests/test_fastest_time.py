@@ -245,3 +245,21 @@ def test_a_saved_fastest_time_filter_is_kept_when_other_settings_are_saved_while
     with db.connect() as conn:
         saved = conn.execute("SELECT filters FROM list_settings").fetchone()["filters"]
     assert saved == {"fastest_time": {"max": 250}}
+
+
+@setting_off
+def test_a_saved_fastest_time_sort_is_kept_when_filters_are_saved_while_off(synced, db):
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO list_settings (athlete_id, list_kind, sort_field, sort_direction, filters)
+            VALUES (1001, 'my_segments', 'fastest_time', 'asc', '{}')
+            """
+        )
+
+    filter_by(synced, name_search="i")
+    synced.post("/filters/clear", data={"list": "my_segments"})
+
+    with db.connect() as conn:
+        saved = conn.execute("SELECT sort_field, sort_direction FROM list_settings").fetchone()
+    assert (saved["sort_field"], saved["sort_direction"]) == ("fastest_time", "asc")

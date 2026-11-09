@@ -183,6 +183,21 @@ def save_list_settings(
     )
 
 
+def save_list_filters(
+    conn: psycopg.Connection, athlete_id: int, kind: str, settings: ListSettings
+) -> None:
+    """Saves only the filters, so a saved sort the list can't use right now (on a field
+    whose setting is off) is still there when the setting is turned back on."""
+    conn.execute(
+        """
+        INSERT INTO list_settings (athlete_id, list_kind, sort_field, sort_direction, filters)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (athlete_id, list_kind) DO UPDATE SET filters = EXCLUDED.filters
+        """,
+        (athlete_id, kind, settings.sort_field, settings.sort_direction, Jsonb(settings.filters)),
+    )
+
+
 # Filters
 #
 # A list's filters are saved as one JSON object, {field key: filter}, with an entry only
