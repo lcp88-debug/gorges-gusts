@@ -26,7 +26,6 @@ from app.lists import (
     can_sort,
     choose_sort,
     filter_boxes,
-    filters_in_use,
     has_missing_details,
     hidden_filters,
     hour_options,
@@ -34,7 +33,6 @@ from app.lists import (
     parse_filter_form,
     parse_time_range,
     save_list_settings,
-    segment_list,
     tick_choices,
 )
 from app.maps import Maps
@@ -179,7 +177,8 @@ def create_app(
                 job = _latest_job(conn, athlete_id)
             list_settings = load_list_settings(conn, athlete_id, kind, settings.fastest_time)
             time_range = saved_time_range(request, kind)
-            segments = build_list(
+            # Tick boxes list the towns on the list before filtering.
+            segments, whole_list, filters = build_list(
                 conn,
                 athlete_id,
                 kind,
@@ -189,9 +188,6 @@ def create_app(
                 fastest_time=settings.fastest_time,
                 time_range=time_range,
             )
-            # Tick boxes list the towns on the list before filtering.
-            whole_list = segment_list(conn, athlete_id, kind, now, settings.pooled_explore)
-            filters = filters_in_use(list_settings.filters, whole_list, settings.fastest_time)
 
         active = job is not None and job["status"] in ACTIVE_STATUSES
         # Without a worker running, nothing is going to change.

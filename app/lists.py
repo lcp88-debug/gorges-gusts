@@ -4,7 +4,7 @@ import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -481,6 +481,15 @@ def parse_time_range(start: str, end: str, now: datetime) -> TimeRange:
     return first, last
 
 
+class BuiltList(NamedTuple):
+    """A list as shown: `segments` with the rider's settings applied, `unfiltered` (every
+    segment on the list, with wind numbers, before filtering) and the `filters` in use."""
+
+    segments: list[dict]
+    unfiltered: list[dict]
+    filters: dict
+
+
 def build_list(
     conn: psycopg.Connection,
     athlete_id: int,
@@ -490,15 +499,16 @@ def build_list(
     pooled: bool = False,
     fastest_time: bool = False,
     time_range: TimeRange | None = None,
-) -> list[dict]:
+) -> BuiltList:
     """A rider's list `kind` with every field filled in and their settings applied.
 
     `time_range` limits which hours best hour is chosen from; None means all 48.
     """
-    segments = segment_list(conn, athlete_id, kind, now, pooled)
-    add_wind(conn, athlete_id, segments, now, time_range)
-    filters = filters_in_use(settings.filters, segments, fastest_time)
-    return sort_segments(filter_segments(segments, filters), settings)
+    unfiltered = segment_list(conn, athlete_id, kind, now, pooled)
+    add_wind(conn, athlete_id, unfiltered, now, time_range)
+    filters = filters_in_use(settings.filters, unfiltered, fastest_time)
+    segments = sort_segments(filter_segments(unfiltered, filters), settings)
+    return BuiltList(segments, unfiltered, filters)
 
 
 def has_missing_details(conn: psycopg.Connection, athlete_id: int) -> bool:
