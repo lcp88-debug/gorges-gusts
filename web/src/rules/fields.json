@@ -1,0 +1,19 @@
+{
+  "about": "The one table of list fields, read by both the app (fields.ts) and the server (app/lists.py). kind: how it's filtered. firstClick: the direction of the first sort on it, or null if it can't be sorted. setting: the app setting it needs, if any. The keys are saved in riders' list settings, so think twice before renaming one: a saved key that's no longer here is ignored.",
+  "fields": {
+    "name": { "kind": "search", "firstClick": null },
+    "town": { "kind": "ticks", "firstClick": null },
+    "distance": { "kind": "number", "firstClick": "desc" },
+    "average_grade": { "kind": "number", "firstClick": "desc" },
+    "steepest_grade": { "kind": "number", "firstClick": "desc" },
+    "elevation_gain": { "kind": "number", "firstClick": "desc" },
+    "climb_category": { "kind": "ticks", "firstClick": "desc" },
+    "your_attempts": { "kind": "number", "firstClick": "desc" },
+    "recent_best": { "kind": "number", "firstClick": "asc" },
+    "wind_now": { "kind": "number", "firstClick": "asc" },
+    "best_hour": { "kind": "number", "firstClick": "asc" },
+    "people_on_strava": { "kind": "number", "firstClick": "desc" },
+    "total_attempts": { "kind": "number", "firstClick": "desc" },
+    "fastest_time": { "kind": "number", "firstClick": "asc", "setting": "fastest_time" }
+  }
+}

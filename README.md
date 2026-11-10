@@ -8,9 +8,10 @@ Shows the segments from your last 90 days of road rides, on two lists, My Segmen
 ### One-time setup
 
 1. In your [Strava API settings](https://www.strava.com/settings/api), set **Authorization Callback Domain** to `localhost`, and upgrade the app to 10 athletes.
-2. Install Postgres and the Python packages:
+2. Install Postgres, Node (for the app's screens) and the Python packages:
    ```sh
    conda create -n gorges-pg -c conda-forge postgresql
+   conda create -n gorges-node -c conda-forge nodejs=22
    python -m venv .venv
    .venv/bin/pip install --only-binary cryptography -r requirements.txt
    ```
@@ -25,7 +26,7 @@ Shows the segments from your last 90 days of road rides, on two lists, My Segmen
 ./start.sh
 ```
 
-This starts Postgres if needed, starts the app, and opens <http://localhost:8000> in your browser. Press Ctrl+C to stop the app.
+This starts Postgres if needed, builds the app's screens if their code has changed, starts the app, and opens <http://localhost:8000> in your browser. Press Ctrl+C to stop the app.
 
 Postgres keeps running in the background. To stop it too:
 
@@ -35,10 +36,26 @@ conda run -n gorges-pg pg_ctl -D ~/.local/share/gorges-gusts/pgdata stop
 
 ### Tests
 
-Tests use made-up data and the `TEST_DATABASE_URL` database, and never contact Strava:
+Tests use made-up data and never contact Strava. The server's tests use the `TEST_DATABASE_URL` database:
 
 ```sh
 .venv/bin/python -m pytest
+```
+
+The screens' tests, including sorting and filtering, which happen in the browser:
+
+```sh
+cd web
+PATH="$(conda info --base)/envs/gorges-node/bin:$PATH" npm test
+```
+
+### Working on the screens
+
+The screens are a React app in `web/` (see `docs/adr/0003-react-app-with-list-rules-in-the-browser.md`). To see changes as you save, run `./start.sh` in one terminal and this in another, then open <http://localhost:5173>:
+
+```sh
+cd web
+PATH="$(conda info --base)/envs/gorges-node/bin:$PATH" npm run dev
 ```
 
 ### Wind maps

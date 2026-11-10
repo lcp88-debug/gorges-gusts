@@ -1,7 +1,5 @@
-import re
-import time
-from datetime import datetime, timedelta, timezone
-from dataclasses import replace
+"""Logging in with Strava, the app's page, and what each rider's lists hold."""
+
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -10,133 +8,39 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.strava import API_URL, OAUTH_URL
-from tests.conftest import LOCAL_ROUTE, OUTSIDE_ROUTE, table
-
-ATHLETE_ID = 1001
-ACCESS = "made-up-access-token"
-REFRESH = "made-up-refresh-token"
+from tests.conftest import LOCAL_ROUTE, OUTSIDE_ROUTE
+from tests.helpers import ACCESS, ATHLETE_ID, REFRESH, log_in, mock_strava, names
 
 
-@pytest.fixture
-def app(db, settings):
-    return create_app(settings, start_worker=False)
+# The page
 
 
-@pytest.fixture
-def client(app):
-    with TestClient(app, follow_redirects=False, base_url="http://localhost") as test_client:
-        yield test_client
+def test_the_page_is_the_built_react_app(db, settings, tmp_path):
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "index.html").write_text("<div id=root></div>")
+    (tmp_path / "assets" / "app.js").write_text("console.log(1)")
+    with TestClient(create_app(settings, start_worker=False, web_build=tmp_path)) as client:
+        page = client.get("/")
+        assert page.status_code == 200 and "<div id=root>" in page.text
+        assert page.headers["cache-control"] == "no-cache"
+        assert client.get("/assets/app.js").text == "console.log(1)"
 
 
-@pytest.fixture
-def pooled_app(db, settings):
-    return create_app(replace(settings, pooled_explore=True), start_worker=False)
+def test_a_build_made_after_the_server_started_is_served(db, settings, tmp_path):
+    with TestClient(create_app(settings, start_worker=False, web_build=tmp_path)) as client:
+        assert client.get("/assets/app.js").status_code == 404
+        (tmp_path / "assets").mkdir()
+        (tmp_path / "assets" / "app.js").write_text("console.log(1)")
+        assert client.get("/assets/app.js").text == "console.log(1)"
 
 
-@pytest.fixture
-def pooled_client(pooled_app):
-    with TestClient(pooled_app, follow_redirects=False, base_url="http://localhost") as test_client:
-        yield test_client
+def test_without_a_build_the_page_says_how_to_make_one(db, settings, tmp_path):
+    with TestClient(create_app(settings, start_worker=False, web_build=tmp_path)) as client:
+        page = client.get("/")
+        assert page.status_code == 503 and "start.sh" in page.text
 
 
-def token_response(athlete_id=ATHLETE_ID):
-    return {
-        "access_token": ACCESS,
-        "refresh_token": REFRESH,
-        "expires_at": int(time.time()) + 3600,
-        "athlete": {"id": athlete_id},
-    }
-
-
-def log_in(client, scope="read,activity:read_all", athlete_id=ATHLETE_ID):
-    responses.post(f"{OAUTH_URL}/token", json=token_response(athlete_id))
-    login = client.get("/login")
-    state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
-    return client.get("/auth/callback", params={"state": state, "code": "abc", "scope": scope})
-
-
-def mock_strava():
-    responses.get(
-        f"{API_URL}/athlete/activities",
-        json=[
-            {
-                "id": 1,
-                "sport_type": "Ride",
-                "start_date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "trainer": False,
-                "manual": False,
-                "private": False,
-            }
-        ],
-    )
-    responses.get(
-        f"{API_URL}/activities/1",
-        json={
-            "id": 1,
-            "sport_type": "Ride",
-            "start_date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "segment_efforts": [
-                {
-                    "id": 11,
-                    "start_date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "segment": {"id": 500, "private": False},
-                },
-                {
-                    "id": 12,
-                    "start_date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "elapsed_time": 3723,
-                    "segment": {"id": 500, "private": False},
-                },
-                {
-                    "id": 13,
-                    "start_date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "segment": {"id": 600, "private": False},
-                },
-            ],
-        },
-    )
-    responses.get(
-        f"{API_URL}/segments/500",
-        json={
-            "id": 500,
-            "name": "Often <Climb>",
-            "distance": 3218.68,
-            "average_grade": 5.25,
-            "private": False,
-            "map": {"polyline": LOCAL_ROUTE},
-            "athlete_count": 12,
-            "effort_count": 3456,
-            "city": "Ithaca",
-            "maximum_grade": 11.04,
-            "climb_category": 5,
-            "total_elevation_gain": 152.4,
-            "athlete_segment_stats": {"effort_count": 7},
-        },
-    )
-    responses.get(
-        f"{API_URL}/segments/600",
-        json={
-            "id": 600,
-            "name": "Popular Road",
-            "distance": 1609.34,
-            "average_grade": 1.0,
-            "private": False,
-            "map": {"polyline": LOCAL_ROUTE},
-            "athlete_count": 9000,
-            "effort_count": 50000,
-        },
-    )
-
-
-def segment_order(html):
-    return re.findall(r"<td>(Often &lt;Climb&gt;|Popular Road)</td>", html)
-
-
-def test_logged_out_home_offers_strava_login_and_explains_data_use(client):
-    page = client.get("/").text
-
-    assert "Connect with Strava" in page
-    assert "Private rides aren't added" in page
+# Logging in
 
 
 def test_login_redirects_to_strava_with_a_state(client):
@@ -152,14 +56,23 @@ def test_callback_rejects_a_mismatched_state(client):
     response = client.get("/auth/callback", params={"state": "wrong", "code": "abc"})
 
     assert response.status_code == 303
-    assert "expired" in client.get("/").text
+    assert "expired" in client.get("/api/state").json()["login_error"]
+
+
+def test_a_cancelled_login_says_so(client):
+    login = client.get("/login")
+    state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
+
+    client.get("/auth/callback", params={"state": state, "error": "access_denied"})
+
+    assert client.get("/api/state").json()["login_error"] == "Strava login was cancelled."
 
 
 @responses.activate
 def test_callback_requires_the_needed_scope(client, db):
     log_in(client, scope="read")
 
-    assert "permission" in client.get("/").text
+    assert "permission" in client.get("/api/state").json()["login_error"]
     with db.connect() as conn:
         assert conn.execute("SELECT count(*) AS n FROM athletes").fetchone()["n"] == 0
 
@@ -176,130 +89,46 @@ def test_login_encrypts_tokens_and_queues_a_sync(client, db):
         assert conn.execute("SELECT status FROM sync_jobs").fetchone()["status"] == "pending"
 
 
-@responses.activate
-def test_first_load_shows_progress_then_both_sorted_lists(app, client):
-    log_in(client)
-
-    loading = client.get("/").text
-    assert "Checking Strava" in loading
-    assert 'http-equiv="refresh"' in loading
-    assert "My Segments" not in loading
-
-    mock_strava()
-    assert app.state.worker.run_next_job() is True
-
-    my_segments = client.get("/").text
-    assert 'http-equiv="refresh"' not in my_segments
-    assert segment_order(my_segments) == ["Often &lt;Climb&gt;", "Popular Road"]
-    assert segment_order(client.get("/?list=explore").text) == ["Popular Road", "Often &lt;Climb&gt;"]
+# Lists
 
 
 @responses.activate
-def test_rows_show_the_agreed_details(app, client):
+def test_both_lists_hold_the_riders_segments_once_synced(app, client):
     log_in(client)
     mock_strava()
     app.state.worker.run_next_job()
 
-    page = client.get("/").text
-
-    for expected in (
-        "2.0 mi",
-        "5.2%",
-        "3,456",
-        "<td>Ithaca</td>",
-        "<td>11.0%</td>",
-        "<td>500 ft</td>",
-        "<td>HC</td>",
-        "<td>1:02:03</td>",
-        "View on Strava",
-        "https://www.strava.com/segments/500",
-    ):
-        assert expected in page
-    assert "all time" not in page
+    assert names(client, "my_segments") == ["Often <Climb>", "Popular Road"]
+    assert names(client, "explore") == ["Often <Climb>", "Popular Road"]
 
 
 @responses.activate
-def test_unknown_list_falls_back_to_my_segments(app, client):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-
-    assert segment_order(client.get("/?list=nonsense").text)[0] == "Often &lt;Climb&gt;"
-
-
-@responses.activate
-def test_old_tab_links_open_my_segments(app, client):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-
-    for old in ("attempted", "popular"):
-        page = client.get(f"/?sort={old}").text
-        assert segment_order(page) == ["Often &lt;Climb&gt;", "Popular Road"]
-        assert 'aria-current="page">My Segments' in page
-
-
-NOTE = "other riders' segments will appear once sharing is turned on"
-
-
-@responses.activate
-def test_explore_note_shows_while_pooling_is_off(app, client):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-
-    assert NOTE in client.get("/?list=explore").text
-    assert NOTE not in client.get("/?list=my_segments").text
-
-
-@responses.activate
-def test_explore_note_is_gone_once_pooling_is_on(pooled_app, pooled_client):
-    log_in(pooled_client)
-    mock_strava()
-    pooled_app.state.worker.run_next_job()
-
-    assert NOTE not in pooled_client.get("/?list=explore").text
-
-
-@responses.activate
-def test_refresh_keeps_lists_visible_and_blocks_a_second_refresh(app, client, db):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-
-    client.post("/refresh")
-    client.post("/refresh")
-
-    page = client.get("/").text
-    assert "My Segments" in page
-    assert "disabled" in page
-    with db.connect() as conn:
-        assert (
-            conn.execute("SELECT count(*) AS n FROM sync_jobs WHERE status = 'pending'").fetchone()["n"]
-            == 1
-        )
-
-
-@responses.activate
-def test_no_segments_message(app, client):
+def test_a_rider_with_no_rides_has_empty_lists(app, client):
     log_in(client)
     responses.get(f"{API_URL}/athlete/activities", json=[])
     app.state.worker.run_next_job()
 
-    assert "No segments in this area" in client.get("/").text
+    assert client.get("/api/state").json()["show_lists"] is True
+    assert names(client) == []
 
 
 @responses.activate
-def test_logout_returns_to_the_login_page(app, client):
+def test_segments_outside_the_region_do_not_appear(app, client, db):
     log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+    with db.connect() as conn:
+        conn.execute("UPDATE segments SET polyline = %s WHERE id = 600", (OUTSIDE_ROUTE,))
 
-    client.post("/logout")
+    for kind in ("my_segments", "explore"):
+        assert names(client, kind) == ["Often <Climb>"]
 
-    assert "Connect with Strava" in client.get("/").text
+
+# Coming back after data has expired
 
 
 @responses.activate
-def test_returning_after_data_expired_reloads_instead_of_showing_an_empty_list(app, client, db):
+def test_returning_after_data_expired_syncs_again_instead_of_showing_an_empty_list(app, client, db):
     log_in(client)
     mock_strava()
     app.state.worker.run_next_job()
@@ -308,37 +137,65 @@ def test_returning_after_data_expired_reloads_instead_of_showing_an_empty_list(a
         conn.execute("DELETE FROM rides")
         conn.execute("DELETE FROM segments")
 
-    page = client.get("/").text
+    state = client.get("/api/state").json()
 
-    assert "Checking Strava" in page
-    assert "No segments in this area" not in page
+    assert state["syncing"] is True and state["show_lists"] is False
 
 
 @responses.activate
-def test_failed_first_load_shows_the_error_without_an_empty_list_or_retry(app, client, db):
+def test_visit_fetches_details_that_expired_before_the_riders_own_rides(app, client, db):
     log_in(client)
-    responses.get(f"{API_URL}/athlete/activities", status=401, json={})
+    mock_strava()
+    app.state.worker.run_next_job()
+    with db.connect() as conn:
+        conn.execute("DELETE FROM segments WHERE id = 600")
+
+    client.get("/api/state")
+    assert app.state.worker.run_next_job() is True
+
+    assert "Popular Road" in names(client)
+
+
+@responses.activate
+def test_visit_with_nothing_missing_does_not_queue_a_sync(app, client):
+    log_in(client)
+    mock_strava()
     app.state.worker.run_next_job()
 
-    page = client.get("/").text
+    client.get("/api/state")
 
-    assert "log in with Strava again" in page
-    assert "No segments in this area" not in page
-    assert "My Segments" not in page
+    assert app.state.worker.run_next_job() is False
+
+
+@responses.activate
+def test_rides_expiring_soon_after_a_refresh_trigger_a_new_sync_not_an_empty_list(app, client, db):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+    client.post("/api/refresh")
+    app.state.worker.run_next_job()
     with db.connect() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM sync_jobs").fetchone()["n"] == 1
+        conn.execute("UPDATE rides SET fetched_at = now() - interval '7 days'")
+    app.state.worker.purge_if_due()
+
+    assert client.get("/api/state").json()["syncing"] is True
+    assert app.state.worker.run_next_job() is True
+    assert "Popular Road" in names(client)
 
 
-def test_connect_page_does_not_promise_data_is_only_shown_to_you_when_pooling_is_on(pooled_client):
-    page = pooled_client.get("/").text
+@responses.activate
+def test_cleanup_with_nothing_expired_does_not_trigger_a_sync(app, client):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+    app.state.worker.purge_if_due()
 
-    assert "only shown to you" not in page
-    assert "other riders" in page
-    assert "turn this off" in page
+    client.get("/api/state")
+
+    assert app.state.worker.run_next_job() is False
 
 
-def test_connect_page_does_not_mention_contributing_when_pooling_is_off(client):
-    assert "other riders" not in client.get("/").text
+# Pooled Explore and contributors
 
 
 def seed_contributor_segment(db, contributes=True):
@@ -373,6 +230,11 @@ def contributes(db):
         ).fetchone()["contributes"]
 
 
+def test_the_app_is_told_whether_explore_is_pooled(client, pooled_client):
+    assert client.get("/api/state").json()["pooled"] is False
+    assert pooled_client.get("/api/state").json()["pooled"] is True
+
+
 @responses.activate
 def test_connecting_with_the_notice_on_screen_makes_a_rider_a_contributor(pooled_client, db):
     log_in(pooled_client)
@@ -390,7 +252,7 @@ def test_connecting_without_the_notice_does_not_make_a_rider_a_contributor(clien
 @responses.activate
 def test_logging_in_again_keeps_an_opt_out(pooled_client, db):
     log_in(pooled_client)
-    pooled_client.post("/contributing/off")
+    pooled_client.put("/api/contributing", json={"on": False})
 
     log_in(pooled_client)
 
@@ -404,8 +266,8 @@ def test_rider_sees_contributors_segments_on_explore_only(pooled_app, pooled_cli
     pooled_app.state.worker.run_next_job()
     seed_contributor_segment(db)
 
-    assert "Their Climb" in pooled_client.get("/?list=explore").text
-    assert "Their Climb" not in pooled_client.get("/?list=my_segments").text
+    assert "Their Climb" in names(pooled_client, "explore")
+    assert "Their Climb" not in names(pooled_client, "my_segments")
 
 
 @responses.activate
@@ -415,212 +277,16 @@ def test_off_switch_keeps_contributors_segments_off_explore(app, client, db):
     app.state.worker.run_next_job()
     seed_contributor_segment(db)
 
-    page = client.get("/?list=explore").text
-
-    assert "Their Climb" not in page
-    assert "/contributing" not in page
+    assert "Their Climb" not in names(client, "explore")
 
 
 @responses.activate
-def test_opting_out_and_back_in_from_the_page(pooled_app, pooled_client, db):
+@pytest.mark.parametrize("on", [False, True])
+def test_opting_out_and_back_in(pooled_app, pooled_client, db, on):
     log_in(pooled_client)
-    mock_strava()
-    pooled_app.state.worker.run_next_job()
-    assert 'action="/contributing/off"' in pooled_client.get("/").text
+    pooled_client.put("/api/contributing", json={"on": not on})
 
-    pooled_client.post("/contributing/off")
+    pooled_client.put("/api/contributing", json={"on": on})
 
-    assert contributes(db) is False
-    assert 'action="/contributing/on"' in pooled_client.get("/").text
-
-    pooled_client.post("/contributing/on")
-
-    assert contributes(db) is True
-
-
-def test_changing_the_setting_when_logged_out_does_nothing(pooled_client):
-    response = pooled_client.post("/contributing/off")
-
-    assert response.status_code == 303
-
-
-@responses.activate
-def test_visit_fetches_details_that_expired_before_the_riders_own_rides(app, client, db):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-    with db.connect() as conn:
-        conn.execute("DELETE FROM segments WHERE id = 600")
-
-    client.get("/")
-    assert app.state.worker.run_next_job() is True
-
-    assert "Popular Road" in client.get("/").text
-
-
-@responses.activate
-def test_visit_with_nothing_missing_does_not_queue_a_sync(app, client):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-
-    client.get("/")
-
-    assert app.state.worker.run_next_job() is False
-
-
-@responses.activate
-def test_rides_expiring_soon_after_a_refresh_trigger_a_new_sync_not_an_empty_list(app, client, db):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-    client.post("/refresh")
-    app.state.worker.run_next_job()
-    with db.connect() as conn:
-        conn.execute("UPDATE rides SET fetched_at = now() - interval '7 days'")
-    app.state.worker.purge_if_due()
-
-    page = client.get("/").text
-
-    assert "No segments in this area" not in page
-    assert "Checking Strava" in page
-    assert app.state.worker.run_next_job() is True
-    assert "Popular Road" in client.get("/").text
-
-
-@responses.activate
-def test_cleanup_with_nothing_expired_does_not_trigger_a_sync(app, client):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-    app.state.worker.purge_if_due()
-
-    client.get("/")
-
-    assert app.state.worker.run_next_job() is False
-
-
-def add_wind_numbers(db, segment_id, percents, less_certain=False):
-    """Stores made-up wind effects, one per hour starting from this hour."""
-    this_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    with db.connect() as conn:
-        conn.execute(
-            "INSERT INTO segment_wind_models (segment_id, steps, less_certain) VALUES (%s, '[]', %s)",
-            (segment_id, less_certain),
-        )
-        for index, percent in enumerate(percents):
-            conn.execute(
-                """
-                INSERT INTO wind_effects (athlete_id, segment_id, hour, percent, speed_ms, from_degrees)
-                VALUES (%s, %s, %s, %s, 4.4704, 225)
-                """,
-                (ATHLETE_ID, segment_id, this_hour + timedelta(hours=index), percent),
-            )
-
-
-@responses.activate
-def test_rows_show_now_best_and_hours(app, client, db):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-    add_wind_numbers(db, 500, [3.4, -8.6])
-
-    page = client.get("/").text
-
-    assert "+3%" in page and "−9%" in page
-    assert "10 mph from SW" in page
-    assert "<summary>Hours</summary>" in page
-    assert "Less certain" not in page
-    assert "estimates from forecast wind" in page
-    assert "Open-Meteo" in page and "ESA WorldCover" in page and "Copernicus DEM" in page
-
-
-@responses.activate
-def test_less_certain_numbers_are_marked(app, client, db):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-    add_wind_numbers(db, 500, [3.0], less_certain=True)
-
-    assert 'title="Less certain' in client.get("/").text
-
-
-@responses.activate
-def test_missing_wind_shows_a_dash_and_no_hours(app, client):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-
-    page = client.get("/").text
-
-    assert "<summary>Hours</summary>" not in page
-    for row in table(page):
-        assert [row["Wind now"], row["Best hour"], row["Next 48 hours"]] == ["–", "–", "–"]
-
-
-@responses.activate
-def test_profile_is_saved_and_asks_for_new_numbers(app, client, db):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-    with db.connect() as conn:
-        conn.execute("UPDATE athletes SET wind_stale = FALSE")
-
-    response = client.post("/profile", data={"weight_kg": "68.5", "power_20min_w": "275"})
-
-    assert response.status_code == 303
-    with db.connect() as conn:
-        row = conn.execute("SELECT weight_kg, power_20min_w, wind_stale FROM athletes").fetchone()
-    assert row == {"weight_kg": 68.5, "power_20min_w": 275, "wind_stale": True}
-    page = client.get("/").text
-    assert 'value="68.5"' in page and 'value="275.0"' in page
-
-
-@responses.activate
-def test_blank_profile_returns_to_standard_values(app, client, db):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-    client.post("/profile", data={"weight_kg": "68", "power_20min_w": "275"})
-
-    client.post("/profile", data={"weight_kg": "", "power_20min_w": ""})
-
-    with db.connect() as conn:
-        row = conn.execute("SELECT weight_kg, power_20min_w FROM athletes").fetchone()
-    assert row == {"weight_kg": None, "power_20min_w": None}
-    page = client.get("/").text
-    assert 'placeholder="75"' in page and 'placeholder="200"' in page
-
-
-@responses.activate
-@pytest.mark.parametrize(
-    "weight, power", [("5", "200"), ("70", "5000"), ("heavy", "200"), ("nan", "200"), ("70", "inf")]
-)
-def test_invalid_profile_changes_nothing_and_explains(app, client, db, weight, power):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-
-    client.post("/profile", data={"weight_kg": weight, "power_20min_w": power})
-
-    with db.connect() as conn:
-        row = conn.execute("SELECT weight_kg, power_20min_w FROM athletes").fetchone()
-    assert row == {"weight_kg": None, "power_20min_w": None}
-    assert "Nothing was changed" in client.get("/").text
-    assert "Nothing was changed" not in client.get("/").text
-
-
-def test_profile_needs_a_login(client, db):
-    assert client.post("/profile", data={"weight_kg": "70"}).status_code == 303
-
-
-@responses.activate
-def test_segments_outside_the_region_do_not_appear(app, client, db):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-    with db.connect() as conn:
-        conn.execute("UPDATE segments SET polyline = %s WHERE id = 600", (OUTSIDE_ROUTE,))
-
-    for kind in ("my_segments", "explore"):
-        assert segment_order(client.get(f"/?list={kind}").text) == ["Often &lt;Climb&gt;"]
+    assert contributes(db) is on
+    assert pooled_client.get("/api/state").json()["contributes"] is on

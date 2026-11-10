@@ -26,7 +26,7 @@ def test_builds_unique_segments_with_90_day_counts(conn, fake):
     assert fake.calls.count("segment:10") == 1
 
 
-# Sorting is tested on the page, in tests/test_list_sort.py.
+# Sorting happens in the browser, tested in web/src/rules/lists.test.ts.
 
 
 @pytest.mark.parametrize(

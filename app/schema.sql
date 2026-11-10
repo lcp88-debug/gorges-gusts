@@ -20,8 +20,9 @@ ALTER TABLE athletes ADD COLUMN IF NOT EXISTS wind_started_at TIMESTAMPTZ;
 ALTER TABLE athletes ADD COLUMN IF NOT EXISTS wind_updated_at TIMESTAMPTZ;
 
 -- A rider's own choices for each list, not Strava data: kept until the rider is deleted.
--- Fields are named by the keys in app/lists.py FIELDS; unknown ones are ignored on load.
--- filters holds one entry per filtered field, keyed the same way.
+-- Fields are named by the keys in web/src/rules/fields.json; unknown ones are ignored on load.
+-- filters holds one entry per filtered field, keyed the same way. Town ticks are Strava
+-- data, so they're never kept here (VISIT_FIELDS in app/lists.py).
 CREATE TABLE IF NOT EXISTS list_settings (
     athlete_id     BIGINT NOT NULL REFERENCES athletes (id) ON DELETE CASCADE,
     list_kind      TEXT NOT NULL,
@@ -30,6 +31,8 @@ CREATE TABLE IF NOT EXISTS list_settings (
     filters        JSONB NOT NULL DEFAULT '{}',
     PRIMARY KEY (athlete_id, list_kind)
 );
+-- Town ticks saved before they moved to the session.
+UPDATE list_settings SET filters = filters - 'town' WHERE filters ? 'town';
 
 -- Whether each app setting was on at the last startup, to notice one being turned on
 -- (see note_fastest_time_setting in app/db.py). Not Strava data.

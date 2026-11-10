@@ -1,4 +1,6 @@
-"""Segment times as riders read and type them: m:ss, or h:mm:ss for an hour or more."""
+"""Segment times as Strava writes them: m:ss, or h:mm:ss for an hour or more.
+
+The browser reads and shows them for riders (web/src/rules/times.ts)."""
 
 
 def parse_time(text: str) -> float:
@@ -13,10 +15,3 @@ def parse_time(text: str) -> float:
     for number in numbers:
         total = total * 60 + number
     return float(total)
-
-
-def format_time(seconds: float) -> str:
-    """Seconds as m:ss, or h:mm:ss for an hour or more."""
-    hours, rest = divmod(round(seconds), 3600)
-    minutes, secs = divmod(rest, 60)
-    return f"{hours}:{minutes:02}:{secs:02}" if hours else f"{minutes}:{secs:02}"
