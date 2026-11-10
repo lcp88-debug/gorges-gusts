@@ -54,6 +54,11 @@ FIELDS: dict[str, Field] = _read_fields()
 # Fields that only exist while their app setting is on.
 SETTING_FIELDS = {key for key, info in FIELDS.items() if info.setting}
 
+# Filters whose values are Strava data (town names come from each segment's city). Strava
+# data can't be kept for more than 7 days (API Policy s.6.2), so these aren't saved with
+# the rider's list settings: they're kept in the session for the visit, like time ranges.
+VISIT_FIELDS = {"town"}
+
 
 def active_fields(fastest_time: bool = False) -> dict[str, Field]:
     """The fields the list has. Without the fastest-time setting, that field is absent from
@@ -101,9 +106,8 @@ def load_list_settings(
     ).fetchone()
     if row is None:
         return default_settings(kind)
-    settings = ListSettings(
-        row["sort_field"], row["sort_direction"], clean_filters(row["filters"])
-    )
+    saved = {key: value for key, value in clean_filters(row["filters"]).items() if key not in VISIT_FIELDS}
+    settings = ListSettings(row["sort_field"], row["sort_direction"], saved)
     sort = active_fields(fastest_time).get(settings.sort_field)
     if sort is None or sort.first_click is None or settings.sort_direction not in ("asc", "desc"):
         default = default_settings(kind)

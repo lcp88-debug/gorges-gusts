@@ -22,6 +22,7 @@ from app.lists import (
     has_missing_details,
     hidden_filters,
     hour_options,
+    VISIT_FIELDS,
     load_list_settings,
     parse_time_range,
     save_list_filters,
@@ -92,7 +93,7 @@ def record_visit(conn, request: Request, athlete_id: int, now: datetime) -> dict
     """Notes that the rider is using the app, and returns their row (None if they're gone).
 
     A rider whose previous visit was more than an hour ago starts a new visit, which resets
-    their time ranges. So does a rider never seen before.
+    their time ranges and town ticks. So does a rider never seen before.
     """
     before = conn.execute(
         "SELECT last_seen_at FROM athletes WHERE id = %s", (athlete_id,)
@@ -101,6 +102,7 @@ def record_visit(conn, request: Request, athlete_id: int, now: datetime) -> dict
         now - before["last_seen_at"] > SEEN_RECENTLY
     ):
         request.session.pop("time_ranges", None)
+        request.session.pop("visit_filters", None)
     return conn.execute(
         """
         UPDATE athletes SET last_seen_at = %s WHERE id = %s
@@ -242,7 +244,10 @@ def api_router(db: Database, settings: Settings, worker_running: Callable[[], bo
             ],
             "sort": {"field": list_settings.sort_field, "direction": list_settings.sort_direction},
             # Filters on a field whose setting is off stay saved but aren't the app's business.
-            "filters": {key: value for key, value in list_settings.filters.items() if key in shown},
+            "filters": {
+                **{key: value for key, value in list_settings.filters.items() if key in shown},
+                **request.session.get("visit_filters", {}).get(kind, {}),
+            },
             "time_range": [_iso(t) for t in time_range] if time_range else None,
             "hours": [_iso(hour) for hour in hour_options(now)],
             "this_hour": _iso(this_hour(now)),
@@ -266,7 +271,8 @@ def api_router(db: Database, settings: Settings, worker_running: Callable[[], bo
         """Replaces the list's filters with the ones the app sends.
 
         Malformed entries are dropped. Filters on a field whose setting is off aren't sent
-        by the app, and stay as they were.
+        by the app, and stay as they were. Town ticks are kept for this visit only (see
+        VISIT_FIELDS).
         """
         athlete_id = rider(request)
         if athlete_id is None:
@@ -275,10 +281,23 @@ def api_router(db: Database, settings: Settings, worker_running: Callable[[], bo
             return JSONResponse(UNKNOWN_LIST, status_code=404)
         shown = active_fields(settings.fastest_time)
         sent = {key: value for key, value in clean_filters(choice.filters).items() if key in shown}
+        kept = {key: value for key, value in sent.items() if key not in VISIT_FIELDS}
+        for_visit = {key: value for key, value in sent.items() if key in VISIT_FIELDS}
+        now = datetime.now(timezone.utc)
         with db.connect() as conn:
+            # Part of a visit, so the next look at the list mustn't reset the town ticks.
+            record_visit(conn, request, athlete_id, now)
             list_settings = load_list_settings(conn, athlete_id, kind, settings.fastest_time)
-            list_settings.filters = {**hidden_filters(list_settings.filters, settings.fastest_time), **sent}
+            list_settings.filters = {**hidden_filters(list_settings.filters, settings.fastest_time), **kept}
             save_list_filters(conn, athlete_id, kind, list_settings)
+        visit = dict(request.session.get("visit_filters", {}))
+        if visit.get(kind, {}) != for_visit:
+            # Only touched when it changes: each change sends the session cookie back.
+            if for_visit:
+                visit[kind] = for_visit
+            else:
+                visit.pop(kind, None)
+            request.session["visit_filters"] = visit
         return {"filters": sent}
 
     @router.put("/lists/{kind}/time-range")

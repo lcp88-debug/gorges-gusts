@@ -82,8 +82,9 @@ export function tickChoices(key: string, rows: Row[]): [TickValue, string][] {
 /**
  * The saved filters that apply to a list whose segments before filtering are `rows`.
  *
- * Ticks with no box are left out: a town that's no longer on the list. They stay saved
- * all the same, until the rider clears filters.
+ * Ticks with no box are left out: a town that's no longer on the list. They stay ticked
+ * all the same, until the rider clears filters or the visit ends (town ticks are kept for
+ * the visit only, see app/lists.py VISIT_FIELDS).
  */
 export function filtersInUse(filters: Filters, rows: Row[], fastestTime: boolean): Filters {
   const fields = activeFields(fastestTime);

@@ -10,7 +10,15 @@ from fastapi.testclient import TestClient
 
 from app.api import saved_time_range
 from app.strava import API_URL
-from tests.helpers import add_wind_numbers, hour, log_in, mock_strava, saved_settings, this_hour
+from tests.helpers import (
+    ATHLETE_ID,
+    add_wind_numbers,
+    hour,
+    log_in,
+    mock_strava,
+    saved_settings,
+    this_hour,
+)
 
 OTHER = 3003
 
@@ -194,9 +202,42 @@ def test_filters_are_saved_cleaned_and_sent_back(synced, db):
         "name": "climb",
     }
     assert response.json() == {"filters": expected}
-    assert saved_row(db)["filters"] == expected
+    # Town names are Strava data, so town ticks are kept in the session, not saved.
+    assert saved_row(db)["filters"] == {key: value for key, value in expected.items() if key != "town"}
     assert synced.get("/api/lists/my_segments").json()["filters"] == expected
     assert synced.get("/api/lists/explore").json()["filters"] == {}
+
+
+def test_town_ticks_last_for_the_visit_only(synced, db):
+    synced.put("/api/lists/my_segments/filters", json={"filters": {"town": ["Ithaca"], "name": "road"}})
+    assert synced.get("/api/lists/my_segments").json()["filters"]["town"] == ["Ithaca"]
+
+    with db.connect() as conn:
+        conn.execute("UPDATE athletes SET last_seen_at = now() - interval '61 minutes'")
+    synced.get("/api/state")
+
+    assert synced.get("/api/lists/my_segments").json()["filters"] == {"name": "road"}
+
+
+def test_unticking_every_town_clears_them_for_the_visit(synced):
+    synced.put("/api/lists/my_segments/filters", json={"filters": {"town": ["Ithaca"]}})
+
+    synced.put("/api/lists/my_segments/filters", json={"filters": {}})
+
+    assert synced.get("/api/lists/my_segments").json()["filters"] == {}
+
+
+def test_town_ticks_saved_before_are_deleted_at_startup(synced, db):
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO list_settings VALUES (%s, 'my_segments', 'distance', 'asc', %s)
+            """,
+            (ATHLETE_ID, json.dumps({"town": ["Ithaca"], "name": "road"})),
+        )
+    db.init_schema()
+
+    assert saved_row(db)["filters"] == {"name": "road"}
 
 
 def test_sending_no_filters_clears_them_and_leaves_the_sort(synced, db):
