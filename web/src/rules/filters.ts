@@ -5,7 +5,7 @@
 
 import { activeFields, FIELDS, shownNumber, type Field } from "./fields";
 import { formatTime, parseTime } from "./times";
-import type { Filters, NumberFilter, Row, TickValue } from "./types";
+import type { Filter, Filters, NumberFilter, Row, TickValue } from "./types";
 
 /** An entry that can't be used, with the message shown to the rider. */
 export class FilterError extends Error {}
@@ -103,15 +103,19 @@ export function filtersInUse(filters: Filters, rows: Row[], fastestTime: boolean
   return inUse;
 }
 
+// How each kind of filter tests a value, like CLEANERS in app/lists.py.
+const MATCHES: Record<Field["kind"], (value: unknown, saved: Filter, field: Field) => boolean> = {
+  number: (value, saved, field) => numberMatches(value, saved as NumberFilter, field),
+  ticks: (value, saved) => ticksMatch(value, saved as TickValue[]),
+  search: (value, saved) => searchMatches(value, saved as string),
+};
+
 /** The rows that pass every filter in `filters` (see filtersInUse). */
 export function filterRows(rows: Row[], filters: Filters): Row[] {
   return rows.filter((row) =>
     Object.entries(filters).every(([key, saved]) => {
       const field = FIELDS[key];
-      const value = field.value(row);
-      if (field.kind === "number") return numberMatches(value, saved as NumberFilter, field);
-      if (field.kind === "ticks") return ticksMatch(value, saved as TickValue[]);
-      return searchMatches(value, saved as string);
+      return MATCHES[field.kind](field.value(row), saved, field);
     }),
   );
 }

@@ -1,7 +1,7 @@
 // The Sort, Filter and Time panels, and the hour-by-hour view of one segment.
 
 import { useState } from "react";
-import { activeFields, FIELDS, show } from "../rules/fields";
+import { activeFields, FIELDS, show, type Field } from "../rules/fields";
 import {
   FilterError,
   numberBoxes,
@@ -81,56 +81,56 @@ export function FilterPanel({ filters, unfiltered, fastestTime, onFilters, onClo
 
   const ticked = (key: string) => (filters[key] as TickValue[] | undefined) ?? [];
 
+  // The boxes for each kind of filter.
+  const editors: Record<Field["kind"], (key: string, field: Field) => JSX.Element> = {
+    search: (key, field) => (
+      <div className="filter-group" key={key}>
+        <label className="field" htmlFor={`${key}_search`} style={{ fontSize: ".9rem", color: "var(--fg)", fontWeight: 600 }}>
+          {field.label} contains
+        </label>
+        <input id={`${key}_search`} type="text" value={(filters[key] as string | undefined) ?? ""}
+          onChange={(event) => onFilters(withFilter(filters, key, event.target.value || null))} />
+      </div>
+    ),
+    ticks: (key, field) => {
+      const choices = tickChoices(key, unfiltered);
+      return (
+        <div className="filter-group" key={key}>
+          <span>{field.label}</span>
+          <div className="ticks">
+            {choices.length === 0 && <em className="muted small">none on this list</em>}
+            {choices.map(([value, label]) => (
+              <label key={String(value)}>
+                <input type="checkbox" checked={ticked(key).includes(value)}
+                  onChange={(event) => onFilters(toggleTick(filters, key, value, event.target.checked))} />
+                {label}
+              </label>
+            ))}
+          </div>
+        </div>
+      );
+    },
+    number: (key, field) => (
+      <div className="filter-group" key={key}>
+        <span>{field.label}{field.unit ? ` (${field.unit})` : ""}</span>
+        <div className="minmax">
+          {(["min", "max"] as const).map((edge) => (
+            <label className="field" key={edge}>
+              {edge === "min" ? "Min" : "Max"}
+              <input id={`${key}_${edge}`} type="text" inputMode={field.isTime ? "text" : "decimal"}
+                placeholder={field.isTime ? "m:ss" : ""} value={boxes[key][edge]} aria-invalid={key in errors}
+                onChange={(event) => typeNumber(key, edge, event.target.value)} />
+            </label>
+          ))}
+        </div>
+        {errors[key] && <p className="error" role="alert">{errors[key]}</p>}
+      </div>
+    ),
+  };
+
   return (
     <Sheet title="Filters" onClose={onClose} action={<button onClick={clearAll}>Clear all filters</button>}>
-      {Object.entries(fields).map(([key, field]) => {
-        if (field.kind === "search") {
-          return (
-            <div className="filter-group" key={key}>
-              <label className="field" htmlFor={`${key}_search`} style={{ fontSize: ".9rem", color: "var(--fg)", fontWeight: 600 }}>
-                {field.label} contains
-              </label>
-              <input id={`${key}_search`} type="text" value={(filters[key] as string | undefined) ?? ""}
-                onChange={(event) => onFilters(withFilter(filters, key, event.target.value || null))} />
-            </div>
-          );
-        }
-        if (field.kind === "ticks") {
-          const choices = tickChoices(key, unfiltered);
-          return (
-            <div className="filter-group" key={key}>
-              <span>{field.label}</span>
-              <div className="ticks">
-                {choices.length === 0 && <em className="muted small">none on this list</em>}
-                {choices.map(([value, label]) => (
-                  <label key={String(value)}>
-                    <input type="checkbox" checked={ticked(key).includes(value)}
-                      onChange={(event) => onFilters(toggleTick(filters, key, value, event.target.checked))} />
-                    {label}
-                  </label>
-                ))}
-              </div>
-            </div>
-          );
-        }
-        const placeholder = field.isTime ? "m:ss" : "";
-        return (
-          <div className="filter-group" key={key}>
-            <span>{field.label}{field.unit ? ` (${field.unit})` : ""}</span>
-            <div className="minmax">
-              {(["min", "max"] as const).map((edge) => (
-                <label className="field" key={edge}>
-                  {edge === "min" ? "Min" : "Max"}
-                  <input id={`${key}_${edge}`} type="text" inputMode={field.isTime ? "text" : "decimal"}
-                    placeholder={placeholder} value={boxes[key][edge]} aria-invalid={key in errors}
-                    onChange={(event) => typeNumber(key, edge, event.target.value)} />
-                </label>
-              ))}
-            </div>
-            {errors[key] && <p className="error" role="alert">{errors[key]}</p>}
-          </div>
-        );
-      })}
+      {Object.entries(fields).map(([key, field]) => editors[field.kind](key, field))}
       <div className="sheet-foot">
         <span className="muted small">The list changes as you type.</span>
         <button className="btn primary" onClick={onClose}>Show results</button>

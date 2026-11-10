@@ -2,7 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api, Refused, type LoggedIn } from "../api";
-import { FIELDS, show } from "../rules/fields";
+import { activeFields, FIELDS, show } from "../rules/fields";
 import { filterCount } from "../rules/filters";
 import { buildList, chooseSort } from "../rules/lists";
 import type { Filters, ListData, ListKind, Row, Sort, TimeRange } from "../rules/types";
@@ -184,19 +184,23 @@ export function ListScreen({ kind, state, data, wide, onRefresh, onChoices }: {
   );
 }
 
+// A segment's details, in order, by field key: labels come from FIELDS.
+const DETAILS: [string, (row: Row) => string][] = [
+  ["distance", (row) => show.miles(row.distance_m)],
+  ["average_grade", (row) => show.percent(row.average_grade)],
+  ["steepest_grade", (row) => show.percent(row.maximum_grade)],
+  ["elevation_gain", (row) => show.feet(row.elevation_gain_m)],
+  ["climb_category", (row) => show.climbCategory(row.climb_category)],
+  ["your_attempts", (row) => show.count(row.recent_efforts)],
+  ["recent_best", (row) => show.duration(row.recent_best)],
+  ["people_on_strava", (row) => show.count(row.athlete_count)],
+  ["total_attempts", (row) => show.count(row.effort_count)],
+  ["fastest_time", (row) => show.duration(row.fastest_time_s)],
+];
+
 function Facts({ row, fastestTime }: { row: Row; fastestTime: boolean }) {
-  const facts: [string, string][] = [
-    ["Distance", show.miles(row.distance_m)],
-    ["Avg grade", show.percent(row.average_grade)],
-    ["Steepest grade", show.percent(row.maximum_grade)],
-    ["Elevation gain", show.feet(row.elevation_gain_m)],
-    ["Climb category", show.climbCategory(row.climb_category)],
-    ["Your attempts, 90 days", show.count(row.recent_efforts)],
-    ["Recent best", show.duration(row.recent_best)],
-    ["People on Strava", show.count(row.athlete_count)],
-    ["Total attempts", show.count(row.effort_count)],
-  ];
-  if (fastestTime) facts.push(["Fastest time", show.duration(row.fastest_time_s)]);
+  const fields = activeFields(fastestTime);
+  const facts = DETAILS.filter(([key]) => key in fields).map(([key, text]) => [FIELDS[key].label, text(row)]);
   return (
     <dl className="facts">
       {facts.map(([label, value]) => (
