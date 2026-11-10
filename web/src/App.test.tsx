@@ -391,3 +391,11 @@ test("logging out waits for a save already on its way", async () => {
   await act(async () => save.release());
   expect(calls.some((call) => call.path === "/api/logout")).toBe(true);
 });
+
+test("the Time button shows the range with its day after a colon", async () => {
+  serve({ "GET /api/state": LOGGED_IN, "GET /api/lists/my_segments": list({ time_range: [hour(0), hour(3)] }) });
+  render(<App />);
+
+  const button = await screen.findByRole("button", { name: /Time/ });
+  expect(button.textContent).toMatch(/^Time: \w{3} \d{1,2}(am|pm)–\d{1,2}(am|pm)$/);
+});

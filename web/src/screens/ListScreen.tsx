@@ -124,7 +124,7 @@ export function ListScreen({ kind, state, data, wide, onRefresh, onChoices }: {
             Filter{count > 0 && <span className="val">({count})</span>}
           </button>
           <button className={range ? "chip on" : "chip"} onClick={() => toggle("time")} aria-expanded={panel === "time"}>
-            Time <span className="val">{range ? `${show.hour(range[0])}–${show.clock(range[1])}` : "48 h"}</span>
+            Time: <span className="val">{range ? `${show.hour(range[0])}–${show.clock(range[1])}` : "48 h"}</span>
           </button>
           {wide && <span className="count">{built.rows.length} of {built.unfiltered.length} segments</span>}
           {panel === "sort" && (
