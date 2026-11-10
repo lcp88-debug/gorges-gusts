@@ -19,6 +19,25 @@ ALTER TABLE athletes ADD COLUMN IF NOT EXISTS wind_stale BOOLEAN NOT NULL DEFAUL
 ALTER TABLE athletes ADD COLUMN IF NOT EXISTS wind_started_at TIMESTAMPTZ;
 ALTER TABLE athletes ADD COLUMN IF NOT EXISTS wind_updated_at TIMESTAMPTZ;
 
+-- A rider's own choices for each list, not Strava data: kept until the rider is deleted.
+-- Fields are named by the keys in app/lists.py FIELDS; unknown ones are ignored on load.
+-- filters holds one entry per filtered field, keyed the same way.
+CREATE TABLE IF NOT EXISTS list_settings (
+    athlete_id     BIGINT NOT NULL REFERENCES athletes (id) ON DELETE CASCADE,
+    list_kind      TEXT NOT NULL,
+    sort_field     TEXT NOT NULL,
+    sort_direction TEXT NOT NULL CHECK (sort_direction IN ('asc', 'desc')),
+    filters        JSONB NOT NULL DEFAULT '{}',
+    PRIMARY KEY (athlete_id, list_kind)
+);
+
+-- Whether each app setting was on at the last startup, to notice one being turned on
+-- (see note_fastest_time_setting in app/db.py). Not Strava data.
+CREATE TABLE IF NOT EXISTS app_settings_seen (
+    name  TEXT PRIMARY KEY,
+    is_on BOOLEAN NOT NULL
+);
+
 -- Strava data: every row carries fetched_at and is purged after CACHE_TTL.
 CREATE TABLE IF NOT EXISTS rides (
     id         BIGINT PRIMARY KEY,
@@ -34,6 +53,7 @@ CREATE TABLE IF NOT EXISTS efforts (
     ride_id    BIGINT NOT NULL REFERENCES rides (id) ON DELETE CASCADE,
     segment_id BIGINT NOT NULL,
     start_date TIMESTAMPTZ NOT NULL,
+    elapsed_s  INTEGER,
     fetched_at TIMESTAMPTZ NOT NULL
 );
 -- True only for rides visible to everyone. Older rows stay false until refetched.
@@ -64,8 +84,40 @@ CREATE TABLE IF NOT EXISTS segments (
     polyline      TEXT,
     athlete_count BIGINT,
     effort_count  BIGINT,
+    -- Strava's city.
+    town          TEXT,
+    maximum_grade DOUBLE PRECISION,
+    -- Strava's 0 to 5: 0 is not a climb, 1 is category 4 and 5 is HC.
+    climb_category INTEGER,
+    elevation_gain_m DOUBLE PRECISION,
+    -- Only filled while the fastest-time setting is on. Says nothing about who set it.
+    fastest_time_s INTEGER,
     fetched_at    TIMESTAMPTZ NOT NULL
 );
+
+-- Older versions lacked town, steepest grade, climb category, elevation gain and attempt
+-- times. It's only a cache, so clear it once and let each rider's next visit fetch it again.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'segments'
+          AND column_name = 'climb_category'
+    ) OR NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'efforts'
+          AND column_name = 'elapsed_s'
+    ) THEN
+        TRUNCATE rides, efforts, segments CASCADE;
+        UPDATE athletes SET last_synced_at = NULL, wind_stale = TRUE;
+    END IF;
+END $$;
+ALTER TABLE efforts ADD COLUMN IF NOT EXISTS elapsed_s INTEGER;
+ALTER TABLE segments ADD COLUMN IF NOT EXISTS town TEXT;
+ALTER TABLE segments ADD COLUMN IF NOT EXISTS maximum_grade DOUBLE PRECISION;
+ALTER TABLE segments ADD COLUMN IF NOT EXISTS climb_category INTEGER;
+ALTER TABLE segments ADD COLUMN IF NOT EXISTS elevation_gain_m DOUBLE PRECISION;
+ALTER TABLE segments ADD COLUMN IF NOT EXISTS fastest_time_s INTEGER;
 
 -- Derived from a segment's route, so it's deleted along with the segment.
 CREATE TABLE IF NOT EXISTS segment_wind_models (

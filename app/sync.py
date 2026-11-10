@@ -2,10 +2,12 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 
 import psycopg
+from psycopg import sql
 
 from app.config import RIDE_WINDOW
 from app.db import delete_unused_segments
 from app.strava import NotFound, StravaClient
+from app.times import parse_time
 
 Progress = Callable[[str, int, int], None]
 
@@ -30,6 +32,7 @@ def run_sync(
     athlete_id: int,
     now: datetime,
     progress: Progress = lambda phase, done, total: None,
+    fastest_time: bool = False,
 ) -> None:
     """Bring one athlete's cached rides, efforts and segments up to date.
 
@@ -90,7 +93,7 @@ def run_sync(
                 (athlete_id, segment_id),
             )
         else:
-            _save_segment(conn, segment, now)
+            _save_segment(conn, segment, now, fastest_time)
     progress("segments", len(missing_segments), len(missing_segments))
 
     delete_unused_segments(conn)
@@ -112,10 +115,12 @@ def _save_ride(conn: psycopg.Connection, athlete_id: int, activity: dict, now: d
             conn.execute(
                 """
                 INSERT INTO efforts (
-                    id, athlete_id, ride_id, segment_id, start_date, shareable, fetched_at
+                    id, athlete_id, ride_id, segment_id, start_date, elapsed_s, shareable,
+                    fetched_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET
+                    elapsed_s = EXCLUDED.elapsed_s,
                     shareable = EXCLUDED.shareable,
                     fetched_at = EXCLUDED.fetched_at
                 """,
@@ -125,36 +130,69 @@ def _save_ride(conn: psycopg.Connection, athlete_id: int, activity: dict, now: d
                     activity["id"],
                     effort["segment"]["id"],
                     _parse_time(effort["start_date"]),
+                    effort.get("elapsed_time"),
                     effort.get("visibility") == "everyone",
                     now,
                 ),
             )
 
 
-def _save_segment(conn: psycopg.Connection, segment: dict, now: datetime) -> None:
-    conn.execute(
-        """
-        INSERT INTO segments (
-            id, name, distance_m, average_grade, polyline, athlete_count, effort_count, fetched_at
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (id) DO UPDATE SET
-            name = EXCLUDED.name,
-            distance_m = EXCLUDED.distance_m,
-            average_grade = EXCLUDED.average_grade,
-            polyline = EXCLUDED.polyline,
-            athlete_count = EXCLUDED.athlete_count,
-            effort_count = EXCLUDED.effort_count,
-            fetched_at = EXCLUDED.fetched_at
-        """,
-        (
-            segment["id"],
-            segment["name"],
-            segment.get("distance"),
-            segment.get("average_grade"),
-            (segment.get("map") or {}).get("polyline"),
-            segment.get("athlete_count"),
-            segment.get("effort_count"),
-            now,
+def read_overall_time(text: object) -> int | None:
+    """Strava's overall time text, such as "3:49", "1:02:03" or "49s" for under a minute,
+    as seconds. Blank if unreadable."""
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    if text.endswith("s") and text[:-1].isdigit():
+        return int(text[:-1])
+    try:
+        return int(parse_time(text))
+    except ValueError:
+        return None
+
+
+def segment_details(segment: dict, fastest_time: bool = False) -> dict:
+    """The segment details we keep from Strava's segment reply, keyed by column name.
+
+    A missing value is stored as blank. Fastest time is only read with the setting on,
+    and Strava's reply says who set it, which is never kept.
+    """
+    return {
+        "id": segment["id"],
+        "name": segment["name"],
+        "distance_m": segment.get("distance"),
+        "average_grade": segment.get("average_grade"),
+        "polyline": (segment.get("map") or {}).get("polyline"),
+        "athlete_count": segment.get("athlete_count"),
+        "effort_count": segment.get("effort_count"),
+        "town": segment.get("city") or None,
+        "maximum_grade": segment.get("maximum_grade"),
+        "climb_category": segment.get("climb_category"),
+        "elevation_gain_m": segment.get("total_elevation_gain"),
+        "fastest_time_s": (
+            read_overall_time((segment.get("xoms") or {}).get("overall")) if fastest_time else None
         ),
+    }
+
+
+def _save_segment(
+    conn: psycopg.Connection, segment: dict, now: datetime, fastest_time: bool = False
+) -> None:
+    details = {**segment_details(segment, fastest_time), "fetched_at": now}
+    columns = sql.SQL(", ").join(map(sql.Identifier, details))
+    updates = sql.SQL(", ").join(
+        sql.SQL("{0} = EXCLUDED.{0}").format(sql.Identifier(column))
+        for column in details
+        if column != "id"
+    )
+    conn.execute(
+        sql.SQL(
+            "INSERT INTO segments ({columns}) VALUES ({values}) "
+            "ON CONFLICT (id) DO UPDATE SET {updates}"
+        ).format(
+            columns=columns,
+            values=sql.SQL(", ").join(sql.Placeholder() * len(details)),
+            updates=updates,
+        ),
+        list(details.values()),
     )

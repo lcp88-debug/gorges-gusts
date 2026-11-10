@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -9,7 +9,7 @@ from app.sync import run_sync
 from tests.conftest import ATHLETE, LOCAL_ROUTE, NOW, OTHER_ATHLETE, OUTSIDE_ROUTE, encode_route
 
 
-def names(conn, sort="attempted", athlete=ATHLETE, now=NOW):
+def names(conn, sort="my_segments", athlete=ATHLETE, now=NOW):
     return [row["name"] for row in segment_list(conn, athlete, sort, now)]
 
 
@@ -21,32 +21,12 @@ def test_builds_unique_segments_with_90_day_counts(conn, fake):
 
     run_sync(conn, fake, ATHLETE, NOW)
 
-    rows = segment_list(conn, ATHLETE, "attempted", NOW)
+    rows = segment_list(conn, ATHLETE, "my_segments", NOW)
     assert [(r["name"], r["recent_efforts"]) for r in rows] == [("Climb", 3), ("Flat", 1)]
     assert fake.calls.count("segment:10") == 1
 
 
-def test_two_lists_use_their_own_sort_order(conn, fake):
-    fake.add_ride(1, [10, 10, 20])
-    fake.add_segment(10, "Often ridden", athletes=5)
-    fake.add_segment(20, "Popular", athletes=900)
-
-    run_sync(conn, fake, ATHLETE, NOW)
-
-    assert names(conn, "attempted") == ["Often ridden", "Popular"]
-    assert names(conn, "popular") == ["Popular", "Often ridden"]
-
-
-def test_ties_sort_by_name_and_missing_counts_sort_last(conn, fake):
-    fake.add_ride(1, [10, 20, 30])
-    fake.add_segment(10, "bravo", athletes=5)
-    fake.add_segment(20, "Alpha", athletes=5)
-    fake.add_segment(30, "Charlie", athletes=None)
-
-    run_sync(conn, fake, ATHLETE, NOW)
-
-    assert names(conn, "attempted") == ["Alpha", "bravo", "Charlie"]
-    assert names(conn, "popular") == ["Alpha", "bravo", "Charlie"]
+# Sorting is tested on the page, in tests/test_list_sort.py.
 
 
 @pytest.mark.parametrize(
@@ -176,8 +156,8 @@ def test_second_rider_reuses_segment_details_without_a_request(conn, fake):
     run_sync(conn, fake, OTHER_ATHLETE, NOW)
 
     assert "segment:10" not in fake.calls
-    mine = segment_list(conn, ATHLETE, "attempted", NOW)
-    theirs = segment_list(conn, OTHER_ATHLETE, "attempted", NOW)
+    mine = segment_list(conn, ATHLETE, "my_segments", NOW)
+    theirs = segment_list(conn, OTHER_ATHLETE, "my_segments", NOW)
     assert [(r["name"], r["recent_efforts"]) for r in mine] == [("Shared", 1)]
     assert [(r["name"], r["recent_efforts"]) for r in theirs] == [("Shared", 2)]
 
@@ -187,7 +167,7 @@ def test_all_time_counts_are_gone_from_the_list(conn, fake):
     fake.add_segment(10, "Climb", mine=40)
     run_sync(conn, fake, ATHLETE, NOW)
 
-    assert "all_time_efforts" not in segment_list(conn, ATHLETE, "attempted", NOW)[0]
+    assert "all_time_efforts" not in segment_list(conn, ATHLETE, "my_segments", NOW)[0]
 
 
 def test_old_per_rider_segment_table_is_replaced_on_startup(db):
@@ -217,6 +197,115 @@ def test_old_per_rider_segment_table_is_replaced_on_startup(db):
         }
     assert "athlete_id" not in columns
     assert "all_time_efforts" not in columns
+
+
+def test_new_segment_details_and_attempt_times_are_stored(conn, fake):
+    fake.add_ride(1, [10])
+    fake.details[1]["segment_efforts"][0]["elapsed_time"] = 229
+    fake.add_segment(
+        10,
+        "Hill",
+        city="Ithaca",
+        maximum_grade=12.5,
+        climb_category=3,
+        total_elevation_gain=95.4,
+    )
+
+    run_sync(conn, fake, ATHLETE, NOW)
+
+    [row] = segment_list(conn, ATHLETE, "my_segments", NOW)
+    assert (row["town"], row["maximum_grade"], row["climb_category"], row["elevation_gain_m"]) == (
+        "Ithaca",
+        12.5,
+        3,
+        95.4,
+    )
+    assert row["recent_best"] == 229
+    assert fake.calls == ["list", "activity:1", "segment:10"]
+
+
+def test_missing_new_details_are_stored_as_blank(conn, fake):
+    fake.add_ride(1, [10])
+    fake.add_segment(10, "Bare")
+
+    run_sync(conn, fake, ATHLETE, NOW)
+
+    [row] = segment_list(conn, ATHLETE, "my_segments", NOW)
+    assert [row[key] for key in ("town", "maximum_grade", "climb_category", "elevation_gain_m")] == [
+        None,
+        None,
+        None,
+        None,
+    ]
+    assert row["recent_best"] is None
+
+
+def test_recent_best_is_my_fastest_attempt_in_the_last_90_days(conn, fake):
+    fake.add_ride(1, [10, 10], when="2026-10-20T10:00:00Z")
+    fake.add_ride(2, [10], when="2026-08-01T10:00:00Z")  # Past 90 days by the list time below.
+    for effort, seconds in zip(fake.details[1]["segment_efforts"], [300, 250]):
+        effort["elapsed_time"] = seconds
+    fake.details[2]["segment_efforts"][0]["elapsed_time"] = 100
+    fake.add_segment(10, "Hill")
+    run_sync(conn, fake, ATHLETE, datetime(2026, 10, 25, tzinfo=timezone.utc))
+
+    rows = segment_list(conn, ATHLETE, "my_segments", NOW)
+
+    assert [row["recent_best"] for row in rows] == [250]
+
+
+def test_recent_best_ignores_other_riders_attempts(conn, fake):
+    conn.execute("UPDATE athletes SET contributes = TRUE")
+    fake.add_ride(1, [10])
+    fake.details[1]["segment_efforts"][0]["elapsed_time"] = 300
+    fake.add_segment(10, "Shared")
+    run_sync(conn, fake, ATHLETE, NOW)
+    fake.activities.clear()
+    fake.add_ride(2, [10, 20])
+    for effort in fake.details[2]["segment_efforts"]:
+        effort["elapsed_time"] = 100
+    fake.add_segment(20, "Only theirs")
+    run_sync(conn, fake, OTHER_ATHLETE, NOW)
+
+    rows = segment_list(conn, ATHLETE, "explore", NOW, pooled=True)
+
+    assert [(row["name"], row["recent_best"]) for row in rows] == [
+        ("Only theirs", None),
+        ("Shared", 300),
+    ]
+
+
+def count(conn, table):
+    return conn.execute(f"SELECT count(*) AS n FROM {table}").fetchone()["n"]
+
+
+def test_cache_without_the_new_fields_is_cleared_once_on_startup(db, conn, fake):
+    fake.add_ride(1, [10])
+    fake.add_segment(10, "Old cache")
+    run_sync(conn, fake, ATHLETE, NOW)
+    conn.execute("UPDATE athletes SET last_synced_at = now(), wind_stale = FALSE")
+    conn.execute("INSERT INTO list_settings VALUES (%s, 'explore', 'distance', 'asc', '{}')", (ATHLETE,))
+    # How the tables looked before these fields existed.
+    conn.execute("ALTER TABLE efforts DROP COLUMN elapsed_s")
+    for column in ("town", "maximum_grade", "climb_category", "elevation_gain_m"):
+        conn.execute(f"ALTER TABLE segments DROP COLUMN {column}")
+
+    db.init_schema()
+
+    for table in ("rides", "efforts", "segments"):
+        assert count(conn, table) == 0
+    athlete = conn.execute(
+        "SELECT last_synced_at, wind_stale FROM athletes WHERE id = %s", (ATHLETE,)
+    ).fetchone()
+    assert athlete == {"last_synced_at": None, "wind_stale": True}
+    assert count(conn, "list_settings") == 1
+
+    # The next sync fetches everything again, and a later startup keeps it.
+    fake.details[1]["segment_efforts"][0]["elapsed_time"] = 200
+    run_sync(conn, fake, ATHLETE, NOW)
+    db.init_schema()
+
+    assert [row["recent_best"] for row in segment_list(conn, ATHLETE, "my_segments", NOW)] == [200]
 
 
 def test_polyline_is_stored(conn, fake):
@@ -315,7 +404,7 @@ def test_details_table_does_not_record_who_fetched_them(conn, fake):
     assert not {"athlete_id", "all_time_efforts"} & set(row)
 
 
-# Most Popular with other riders' segments
+# Explore with other riders' segments
 
 
 def contribute(conn, athlete=OTHER_ATHLETE, contributes=True):
@@ -329,11 +418,11 @@ def sync_contributor_ride(conn, fake, segment_id=20, name="Their climb", **ride)
     run_sync(conn, fake, OTHER_ATHLETE, NOW)
 
 
-def pooled_rows(conn, athlete=ATHLETE, sort="popular", now=NOW):
+def pooled_rows(conn, athlete=ATHLETE, sort="explore", now=NOW):
     return segment_list(conn, athlete, sort, now, pooled=True)
 
 
-def test_most_popular_mixes_in_contributors_segments_with_zero_attempts(conn, fake):
+def test_explore_mixes_in_contributors_segments_with_zero_attempts(conn, fake):
     fake.add_ride(1, [10])
     fake.add_segment(10, "My road", athletes=5)
     run_sync(conn, fake, ATHLETE, NOW)
@@ -342,7 +431,7 @@ def test_most_popular_mixes_in_contributors_segments_with_zero_attempts(conn, fa
 
     rows = pooled_rows(conn)
 
-    assert [(r["name"], r["recent_efforts"]) for r in rows] == [("Their climb", 0), ("My road", 1)]
+    assert sorted((r["name"], r["recent_efforts"]) for r in rows) == [("My road", 1), ("Their climb", 0)]
 
 
 def test_contributors_attempts_are_not_counted_as_mine(conn, fake):
@@ -355,11 +444,11 @@ def test_contributors_attempts_are_not_counted_as_mine(conn, fake):
     assert [r["recent_efforts"] for r in pooled_rows(conn)] == [1]
 
 
-def test_most_attempted_stays_limited_to_my_own_segments(conn, fake):
+def test_my_segments_stays_limited_to_my_own_segments(conn, fake):
     contribute(conn)
     sync_contributor_ride(conn, fake)
 
-    assert pooled_rows(conn, sort="attempted") == []
+    assert pooled_rows(conn, sort="my_segments") == []
 
 
 def test_list_rows_name_no_other_rider(conn, fake):
@@ -372,11 +461,11 @@ def test_list_rows_name_no_other_rider(conn, fake):
     assert OTHER_ATHLETE not in row.values()
 
 
-def test_most_popular_is_my_own_segments_when_pooling_is_off(conn, fake):
+def test_explore_is_my_own_segments_when_pooling_is_off(conn, fake):
     contribute(conn)
     sync_contributor_ride(conn, fake)
 
-    assert segment_list(conn, ATHLETE, "popular", NOW) == []
+    assert segment_list(conn, ATHLETE, "explore", NOW) == []
 
 
 def test_opting_out_removes_segments_from_other_riders_lists(conn, fake):
@@ -465,7 +554,7 @@ def test_list_leaves_out_segments_not_fully_inside_the_region(conn, fake, route)
     fake.add_segment(20, "Elsewhere", map={"polyline": route})
     run_sync(conn, fake, ATHLETE, NOW)
 
-    for sort in ("attempted", "popular"):
+    for sort in ("my_segments", "explore"):
         rows = segment_list(conn, ATHLETE, sort, NOW)
         assert [row["name"] for row in rows] == ["Local"]
         assert "polyline" not in rows[0]
@@ -481,6 +570,6 @@ def test_pooled_list_leaves_out_other_riders_segments_elsewhere(conn, fake):
     fake.add_segment(20, "Elsewhere", map={"polyline": OUTSIDE_ROUTE})
     run_sync(conn, fake, OTHER_ATHLETE, NOW)
 
-    rows = segment_list(conn, ATHLETE, "popular", NOW, pooled=True)
+    rows = segment_list(conn, ATHLETE, "explore", NOW, pooled=True)
 
     assert [row["name"] for row in rows] == ["Local"]

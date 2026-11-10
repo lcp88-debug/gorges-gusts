@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.strava import API_URL, OAUTH_URL
-from tests.conftest import LOCAL_ROUTE, OUTSIDE_ROUTE
+from tests.conftest import LOCAL_ROUTE, OUTSIDE_ROUTE, table
 
 ATHLETE_ID = 1001
 ACCESS = "made-up-access-token"
@@ -30,7 +30,7 @@ def client(app):
 
 @pytest.fixture
 def pooled_app(db, settings):
-    return create_app(replace(settings, pooled_most_popular=True), start_worker=False)
+    return create_app(replace(settings, pooled_explore=True), start_worker=False)
 
 
 @pytest.fixture
@@ -39,17 +39,17 @@ def pooled_client(pooled_app):
         yield test_client
 
 
-def token_response():
+def token_response(athlete_id=ATHLETE_ID):
     return {
         "access_token": ACCESS,
         "refresh_token": REFRESH,
         "expires_at": int(time.time()) + 3600,
-        "athlete": {"id": ATHLETE_ID},
+        "athlete": {"id": athlete_id},
     }
 
 
-def log_in(client, scope="read,activity:read_all"):
-    responses.post(f"{OAUTH_URL}/token", json=token_response())
+def log_in(client, scope="read,activity:read_all", athlete_id=ATHLETE_ID):
+    responses.post(f"{OAUTH_URL}/token", json=token_response(athlete_id))
     login = client.get("/login")
     state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
     return client.get("/auth/callback", params={"state": state, "code": "abc", "scope": scope})
@@ -84,6 +84,7 @@ def mock_strava():
                 {
                     "id": 12,
                     "start_date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "elapsed_time": 3723,
                     "segment": {"id": 500, "private": False},
                 },
                 {
@@ -105,6 +106,10 @@ def mock_strava():
             "map": {"polyline": LOCAL_ROUTE},
             "athlete_count": 12,
             "effort_count": 3456,
+            "city": "Ithaca",
+            "maximum_grade": 11.04,
+            "climb_category": 5,
+            "total_elevation_gain": 152.4,
             "athlete_segment_stats": {"effort_count": 7},
         },
     )
@@ -178,15 +183,15 @@ def test_first_load_shows_progress_then_both_sorted_lists(app, client):
     loading = client.get("/").text
     assert "Checking Strava" in loading
     assert 'http-equiv="refresh"' in loading
-    assert "Most attempted" not in loading
+    assert "My Segments" not in loading
 
     mock_strava()
     assert app.state.worker.run_next_job() is True
 
-    attempted = client.get("/").text
-    assert 'http-equiv="refresh"' not in attempted
-    assert segment_order(attempted) == ["Often &lt;Climb&gt;", "Popular Road"]
-    assert segment_order(client.get("/?sort=popular").text) == ["Popular Road", "Often &lt;Climb&gt;"]
+    my_segments = client.get("/").text
+    assert 'http-equiv="refresh"' not in my_segments
+    assert segment_order(my_segments) == ["Often &lt;Climb&gt;", "Popular Road"]
+    assert segment_order(client.get("/?list=explore").text) == ["Popular Road", "Often &lt;Climb&gt;"]
 
 
 @responses.activate
@@ -197,18 +202,63 @@ def test_rows_show_the_agreed_details(app, client):
 
     page = client.get("/").text
 
-    for expected in ("2.0 mi", "5.2%", "3,456", "View on Strava", "https://www.strava.com/segments/500"):
+    for expected in (
+        "2.0 mi",
+        "5.2%",
+        "3,456",
+        "<td>Ithaca</td>",
+        "<td>11.0%</td>",
+        "<td>500 ft</td>",
+        "<td>HC</td>",
+        "<td>1:02:03</td>",
+        "View on Strava",
+        "https://www.strava.com/segments/500",
+    ):
         assert expected in page
     assert "all time" not in page
 
 
 @responses.activate
-def test_unknown_sort_falls_back_to_most_attempted(app, client):
+def test_unknown_list_falls_back_to_my_segments(app, client):
     log_in(client)
     mock_strava()
     app.state.worker.run_next_job()
 
-    assert segment_order(client.get("/?sort=nonsense").text)[0] == "Often &lt;Climb&gt;"
+    assert segment_order(client.get("/?list=nonsense").text)[0] == "Often &lt;Climb&gt;"
+
+
+@responses.activate
+def test_old_tab_links_open_my_segments(app, client):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+
+    for old in ("attempted", "popular"):
+        page = client.get(f"/?sort={old}").text
+        assert segment_order(page) == ["Often &lt;Climb&gt;", "Popular Road"]
+        assert 'aria-current="page">My Segments' in page
+
+
+NOTE = "other riders' segments will appear once sharing is turned on"
+
+
+@responses.activate
+def test_explore_note_shows_while_pooling_is_off(app, client):
+    log_in(client)
+    mock_strava()
+    app.state.worker.run_next_job()
+
+    assert NOTE in client.get("/?list=explore").text
+    assert NOTE not in client.get("/?list=my_segments").text
+
+
+@responses.activate
+def test_explore_note_is_gone_once_pooling_is_on(pooled_app, pooled_client):
+    log_in(pooled_client)
+    mock_strava()
+    pooled_app.state.worker.run_next_job()
+
+    assert NOTE not in pooled_client.get("/?list=explore").text
 
 
 @responses.activate
@@ -221,7 +271,7 @@ def test_refresh_keeps_lists_visible_and_blocks_a_second_refresh(app, client, db
     client.post("/refresh")
 
     page = client.get("/").text
-    assert "Most attempted" in page
+    assert "My Segments" in page
     assert "disabled" in page
     with db.connect() as conn:
         assert (
@@ -274,7 +324,7 @@ def test_failed_first_load_shows_the_error_without_an_empty_list_or_retry(app, c
 
     assert "log in with Strava again" in page
     assert "No segments in this area" not in page
-    assert "Most attempted" not in page
+    assert "My Segments" not in page
     with db.connect() as conn:
         assert conn.execute("SELECT count(*) AS n FROM sync_jobs").fetchone()["n"] == 1
 
@@ -348,24 +398,24 @@ def test_logging_in_again_keeps_an_opt_out(pooled_client, db):
 
 
 @responses.activate
-def test_rider_sees_contributors_segments_on_most_popular_only(pooled_app, pooled_client, db):
+def test_rider_sees_contributors_segments_on_explore_only(pooled_app, pooled_client, db):
     log_in(pooled_client)
     mock_strava()
     pooled_app.state.worker.run_next_job()
     seed_contributor_segment(db)
 
-    assert "Their Climb" in pooled_client.get("/?sort=popular").text
-    assert "Their Climb" not in pooled_client.get("/?sort=attempted").text
+    assert "Their Climb" in pooled_client.get("/?list=explore").text
+    assert "Their Climb" not in pooled_client.get("/?list=my_segments").text
 
 
 @responses.activate
-def test_off_switch_keeps_contributors_segments_off_most_popular(app, client, db):
+def test_off_switch_keeps_contributors_segments_off_explore(app, client, db):
     log_in(client)
     mock_strava()
     app.state.worker.run_next_job()
     seed_contributor_segment(db)
 
-    page = client.get("/?sort=popular").text
+    page = client.get("/?list=explore").text
 
     assert "Their Climb" not in page
     assert "/contributing" not in page
@@ -496,24 +546,6 @@ def test_less_certain_numbers_are_marked(app, client, db):
 
 
 @responses.activate
-def test_clicking_a_wind_heading_sorts_the_current_list(app, client, db):
-    log_in(client)
-    mock_strava()
-    app.state.worker.run_next_job()
-    add_wind_numbers(db, 500, [5.0, 4.0])
-    add_wind_numbers(db, 600, [-2.0, 9.0])
-
-    assert segment_order(client.get("/?sort=attempted").text) == ["Often &lt;Climb&gt;", "Popular Road"]
-    page = client.get("/?sort=attempted&by=now").text
-    assert segment_order(page) == ["Popular Road", "Often &lt;Climb&gt;"]
-    assert 'href="/?sort=attempted&amp;by=best"' in page
-    assert segment_order(client.get("/?sort=attempted&by=nonsense").text) == [
-        "Often &lt;Climb&gt;",
-        "Popular Road",
-    ]
-
-
-@responses.activate
 def test_missing_wind_shows_a_dash_and_no_hours(app, client):
     log_in(client)
     mock_strava()
@@ -522,7 +554,8 @@ def test_missing_wind_shows_a_dash_and_no_hours(app, client):
     page = client.get("/").text
 
     assert "<summary>Hours</summary>" not in page
-    assert page.count("<td>–</td>") == 4
+    for row in table(page):
+        assert [row["Wind now"], row["Best hour"], row["Next 48 hours"]] == ["–", "–", "–"]
 
 
 @responses.activate
@@ -589,5 +622,5 @@ def test_segments_outside_the_region_do_not_appear(app, client, db):
     with db.connect() as conn:
         conn.execute("UPDATE segments SET polyline = %s WHERE id = 600", (OUTSIDE_ROUTE,))
 
-    for sort in ("attempted", "popular"):
-        assert segment_order(client.get(f"/?sort={sort}").text) == ["Often &lt;Climb&gt;"]
+    for kind in ("my_segments", "explore"):
+        assert segment_order(client.get(f"/?list={kind}").text) == ["Often &lt;Climb&gt;"]

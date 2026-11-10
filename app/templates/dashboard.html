@@ -7,6 +7,7 @@
   </div>
 {% endblock %}
 {% macro wind_cell(row, certain) %}{% if row %}{{ row.percent | wind_percent }}{% if not certain %} <abbr title="Less certain: steep ground or a steep descent">~</abbr>{% endif %}{% else %}–{% endif %}{% endmacro %}
+{% macro sort_heading(key) %}<th scope="col"{% if list_settings.sort_field == key %} aria-sort="{{ 'ascending' if list_settings.sort_direction == 'asc' else 'descending' }}"{% endif %}><form method="post" action="/sort"><input type="hidden" name="list" value="{{ list }}"><button name="field" value="{{ key }}">{{ fields[key].label }}</button></form>{% if list_settings.sort_field == key %} <span aria-hidden="true">{{ '↑' if list_settings.sort_direction == 'asc' else '↓' }}</span>{% endif %}</th>{% endmacro %}
 {% block content %}
   {% if profile_error %}<p class="notice error" role="alert">{{ profile_error }}</p>{% endif %}
   {% if active %}
@@ -27,24 +28,77 @@
   {% endif %}
 
   {% if show_lists %}
-    <nav class="tabs" aria-label="Sort order">
-      <a href="/?sort=attempted"{% if sort == "attempted" %} aria-current="page"{% endif %}>Most attempted</a>
-      <a href="/?sort=popular"{% if sort == "popular" %} aria-current="page"{% endif %}>Most popular</a>
+    <nav class="tabs" aria-label="Lists">
+      <a href="/?list=my_segments"{% if list == "my_segments" %} aria-current="page"{% endif %}>My Segments</a>
+      <a href="/?list=explore"{% if list == "explore" %} aria-current="page"{% endif %}>Explore</a>
     </nav>
+    {% if list == "explore" and not pooled %}
+      <p class="notice">Explore matches My Segments for now: other riders' segments will appear once sharing is turned on.</p>
+    {% endif %}
+    {% if filter_error %}<p class="notice error" role="alert">{{ filter_error }}</p>{% endif %}
+    {% if range_error %}<p class="notice error" role="alert">{{ range_error }}</p>{% endif %}
+    <details class="time-range"{% if menu_used == "time_range" or range_error %} open{% endif %}>
+      <summary>Time range{% if time_range %}: {{ time_range[0] | hour }} to {{ time_range[1] | hour }}{% else %}: all 48 hours{% endif %}</summary>
+      <form method="post" action="/timerange">
+        <input type="hidden" name="list" value="{{ list }}">
+        <label>From
+          <select name="start">{% for option in hour_options %}<option value="{{ option.isoformat() }}"{% if time_range and option == time_range[0] %} selected{% endif %}>{{ option | hour }}</option>{% endfor %}</select>
+        </label>
+        <label>To
+          <select name="end">{% for option in hour_options %}<option value="{{ option.isoformat() }}"{% if (time_range and option == time_range[1]) or (not time_range and loop.last) %} selected{% endif %}>{{ option | hour }}</option>{% endfor %}</select>
+        </label>
+        <button>Apply time range</button>
+      </form>
+      <form method="post" action="/timerange/clear"><input type="hidden" name="list" value="{{ list }}"><button class="quiet">All 48 hours</button></form>
+      <p class="muted">Best hour is chosen from inside this range. Wind now and the hours view always show everything.</p>
+    </details>
+    <details class="filters"{% if menu_used == "filters" or filter_error %} open{% endif %}>
+      <summary>Filters{% if filters %} ({{ filters | length }} on){% endif %}</summary>
+      <form method="post" action="/filters">
+        <input type="hidden" name="list" value="{{ list }}">
+        {% for key, boxes in filter_boxes.items() %}
+          {% if fields[key].kind == "number" %}
+          <div><span>{{ fields[key].label }}</span>
+            <label>Min <input name="{{ key }}_min" value="{{ boxes.min }}" placeholder="{{ 'm:ss' if fields[key].is_time else '' }}"></label>
+            <label>Max <input name="{{ key }}_max" value="{{ boxes.max }}" placeholder="{{ 'm:ss' if fields[key].is_time else '' }}"></label>
+          </div>
+          {% elif fields[key].kind == "search" %}
+          <div><label>{{ fields[key].label }} contains <input name="{{ key }}_search" value="{{ boxes.text }}"></label></div>
+          {% elif fields[key].kind == "ticks" %}
+          <div><span>{{ fields[key].label }}</span>
+            {% for value, label in tick_choices[key] %}
+              <label><input type="checkbox" name="{{ key }}_{{ value }}" {% if value in boxes.ticked %}checked{% endif %}> {{ label }}</label>
+              <input type="hidden" name="shown_{{ key }}_{{ value }}" value="">
+            {% else %}
+              <em>none on this list</em>
+            {% endfor %}
+          </div>
+          {% endif %}
+        {% endfor %}
+        <button>Apply filters</button>
+      </form>
+      <form method="post" action="/filters/clear"><input type="hidden" name="list" value="{{ list }}"><button class="quiet">Clear all filters</button></form>
+    </details>
     {% if segments %}
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th scope="col">Segment</th>
-              <th scope="col">Distance</th>
-              <th scope="col">Avg grade</th>
-              <th scope="col">Your efforts, 90 days</th>
-              <th scope="col"><a href="/?sort={{ sort }}&amp;by=now"{% if by == "now" %} aria-current="true"{% endif %}>Now</a></th>
-              <th scope="col"><a href="/?sort={{ sort }}&amp;by=best"{% if by == "best" %} aria-current="true"{% endif %}>Best</a></th>
+              <th scope="col">{{ fields.name.label }}</th>
+              <th scope="col">{{ fields.town.label }}</th>
+              {{ sort_heading("distance") }}
+              {{ sort_heading("average_grade") }}
+              {{ sort_heading("steepest_grade") }}
+              {{ sort_heading("elevation_gain") }}
+              {{ sort_heading("climb_category") }}
+              {{ sort_heading("your_attempts") }}
+              {{ sort_heading("recent_best") }}
+              {{ sort_heading("wind_now") }}
+              {{ sort_heading("best_hour") }}
               <th scope="col">Next 48 hours</th>
-              <th scope="col">Athletes</th>
-              <th scope="col">Total efforts</th>
+              {{ sort_heading("people_on_strava") }}
+              {{ sort_heading("total_attempts") }}
+              {% if fastest_time %}{{ sort_heading("fastest_time") }}{% endif %}
               <th scope="col"><span hidden>Link</span></th>
             </tr>
           </thead>
@@ -52,9 +106,14 @@
             {% for segment in segments %}
               <tr>
                 <td>{{ segment.name }}</td>
+                <td>{{ segment.town | blank }}</td>
                 <td>{{ segment.distance_m | miles }}</td>
                 <td>{{ segment.average_grade | percent }}</td>
+                <td>{{ segment.maximum_grade | percent }}</td>
+                <td>{{ segment.elevation_gain_m | feet }}</td>
+                <td>{{ segment.climb_category | climb_category }}</td>
                 <td>{{ segment.recent_efforts | count }}</td>
+                <td>{{ segment.recent_best | duration }}</td>
                 <td>{{ wind_cell(segment.wind_now, not segment.less_certain) }}</td>
                 <td>{{ wind_cell(segment.wind_best, not segment.less_certain) }}{% if segment.wind_best %}<br><span class="muted">{{ segment.wind_best.hour | hour }}</span>{% endif %}</td>
                 <td>
@@ -75,12 +134,15 @@
                 </td>
                 <td>{{ segment.athlete_count | count }}</td>
                 <td>{{ segment.effort_count | count }}</td>
+                {% if fastest_time %}<td>{{ segment.fastest_time_s | duration }}</td>{% endif %}
                 <td><a href="https://www.strava.com/segments/{{ segment.id }}" target="_blank" rel="noopener">View on Strava</a></td>
               </tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
+    {% elif filters %}
+      <p>No segments match your filters.</p>
     {% elif not active %}
       <p>No segments in this area found in your road rides from the last 90 days.</p>
     {% endif %}
@@ -89,7 +151,7 @@
   {% if show_lists %}
     <p class="muted">
       Wind numbers are estimates from forecast wind: the change in your time at the same effort, compared with no wind. Negative means faster. ~ means less certain.
-      {% if wind_pending and segments %}Working out the latest wind…{% endif %}
+      {% if wind_pending %}Working out the latest wind…{% endif %}
     </p>
     <details class="muted">
       <summary>Your weight and power</summary>
@@ -114,7 +176,7 @@
   {% if pooled %}
     <form class="muted" method="post" action="/contributing/{{ 'off' if contributes else 'on' }}">
       {% if contributes %}
-        Segments from your rides that are visible to everyone can appear on other riders' Most popular lists, without your name.
+        Segments from your rides that are visible to everyone can appear on other riders' Explore lists, without your name.
         <button class="quiet">Turn this off</button>
       {% else %}
         Segments from your rides don't appear on other riders' lists.
