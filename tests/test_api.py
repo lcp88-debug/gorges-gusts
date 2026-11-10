@@ -154,9 +154,13 @@ def test_with_nothing_saved_each_list_has_its_default_sort(synced):
 
 
 def test_lists_need_a_login_and_a_known_list(client, synced):
-    assert synced.get("/api/lists/nonsense").status_code == 404
+    unknown = synced.get("/api/lists/nonsense")
+    assert unknown.status_code == 404 and unknown.json() == {"error": "No such list."}
     synced.post("/api/logout")
-    assert synced.get("/api/lists/my_segments").status_code == 401
+    logged_out = synced.get("/api/lists/my_segments")
+    assert logged_out.status_code == 401 and logged_out.json() == {"error": "Not logged in."}
+    # Not being logged in is said first.
+    assert synced.put("/api/lists/nonsense/filters", json={"filters": {}}).status_code == 401
 
 
 # Sort
@@ -379,7 +383,8 @@ def test_logging_out_ends_the_session(synced):
 )
 def test_changes_need_a_login(client, method, path, body):
     kwargs = {"json": body} if body is not None else {}
-    assert client.request(method.upper(), path, **kwargs).status_code == 401
+    response = client.request(method.upper(), path, **kwargs)
+    assert response.status_code == 401 and response.json() == {"error": "Not logged in."}
 
 
 def test_each_rider_has_their_own_saved_choices(synced, app, db):

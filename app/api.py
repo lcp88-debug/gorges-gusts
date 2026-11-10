@@ -5,9 +5,10 @@ filtering and choosing the best hour happen in the browser, in web/src/rules.
 """
 
 from collections.abc import Callable
+from typing import Annotated
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -44,8 +45,35 @@ def _error(message: str, status: int = 422) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status)
 
 
-NOT_LOGGED_IN = {"error": "Not logged in."}
-UNKNOWN_LIST = {"error": "No such list."}
+class Refusal(Exception):
+    """A request the API turns down, answered as {"error": message} (see refused)."""
+
+    def __init__(self, status: int, message: str):
+        self.status, self.message = status, message
+
+
+def refused(_request: Request, refusal: Refusal) -> JSONResponse:
+    return _error(refusal.message, refusal.status)
+
+
+def logged_in_rider(request: Request) -> int:
+    """The logged-in rider's athlete ID. Refuses the request if nobody is logged in."""
+    athlete_id = request.session.get("athlete_id")
+    if athlete_id is None:
+        raise Refusal(401, "Not logged in.")
+    return athlete_id
+
+
+def list_kind(kind: str) -> str:
+    """The list named in the path. Refuses the request if there's no such list."""
+    if kind not in LIST_KINDS:
+        raise Refusal(404, "No such list.")
+    return kind
+
+
+# Listed in this order in each route, so "not logged in" wins over "no such list".
+Rider = Annotated[int, Depends(logged_in_rider)]
+Kind = Annotated[str, Depends(list_kind)]
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -152,9 +180,6 @@ class ContributingChoice(BaseModel):
 def api_router(db: Database, settings: Settings, worker_running: Callable[[], bool]) -> APIRouter:
     router = APIRouter(prefix="/api")
 
-    def rider(request: Request) -> int | None:
-        return request.session.get("athlete_id")
-
     @router.get("/state")
     def state(request: Request):
         """Who's logged in, how their data is doing, and their profile.
@@ -163,7 +188,7 @@ def api_router(db: Database, settings: Settings, worker_running: Callable[[], bo
         numbers the rider is waiting for), and reloads its lists when
         `lists_version` changes.
         """
-        athlete_id = rider(request)
+        athlete_id = request.session.get("athlete_id")
         if athlete_id is None:
             return {
                 "logged_in": False,
@@ -217,14 +242,9 @@ def api_router(db: Database, settings: Settings, worker_running: Callable[[], bo
         }
 
     @router.get("/lists/{kind}")
-    def get_list(request: Request, kind: str):
+    def get_list(request: Request, athlete_id: Rider, kind: Kind):
         """Every segment on list `kind` with its wind hours, before any filtering, and the
         rider's saved choices for it."""
-        athlete_id = rider(request)
-        if athlete_id is None:
-            return JSONResponse(NOT_LOGGED_IN, status_code=401)
-        if kind not in LIST_KINDS:
-            return JSONResponse(UNKNOWN_LIST, status_code=404)
         now = datetime.now(timezone.utc)
         with db.connect() as conn:
             list_settings = load_list_settings(conn, athlete_id, kind, settings.fastest_time)
@@ -254,12 +274,7 @@ def api_router(db: Database, settings: Settings, worker_running: Callable[[], bo
         }
 
     @router.put("/lists/{kind}/sort")
-    def put_sort(request: Request, kind: str, choice: SortChoice):
-        athlete_id = rider(request)
-        if athlete_id is None:
-            return JSONResponse(NOT_LOGGED_IN, status_code=401)
-        if kind not in LIST_KINDS:
-            return JSONResponse(UNKNOWN_LIST, status_code=404)
+    def put_sort(athlete_id: Rider, kind: Kind, choice: SortChoice):
         if not can_sort(choice.field, settings.fastest_time) or choice.direction not in ("asc", "desc"):
             return _error("That field can't be sorted.")
         with db.connect() as conn:
@@ -267,18 +282,13 @@ def api_router(db: Database, settings: Settings, worker_running: Callable[[], bo
         return {"sort": {"field": choice.field, "direction": choice.direction}}
 
     @router.put("/lists/{kind}/filters")
-    def put_filters(request: Request, kind: str, choice: FilterChoice):
+    def put_filters(request: Request, athlete_id: Rider, kind: Kind, choice: FilterChoice):
         """Replaces the list's filters with the ones the app sends.
 
         Malformed entries are dropped. Filters on a field whose setting is off aren't sent
         by the app, and stay as they were. Town ticks are kept for this visit only (see
         VISIT_FIELDS).
         """
-        athlete_id = rider(request)
-        if athlete_id is None:
-            return JSONResponse(NOT_LOGGED_IN, status_code=401)
-        if kind not in LIST_KINDS:
-            return JSONResponse(UNKNOWN_LIST, status_code=404)
         shown = active_fields(settings.fastest_time)
         sent = {key: value for key, value in clean_filters(choice.filters).items() if key in shown}
         kept = {key: value for key, value in sent.items() if key not in VISIT_FIELDS}
@@ -301,13 +311,8 @@ def api_router(db: Database, settings: Settings, worker_running: Callable[[], bo
         return {"filters": sent}
 
     @router.put("/lists/{kind}/time-range")
-    def put_time_range(request: Request, kind: str, choice: TimeRangeChoice):
+    def put_time_range(request: Request, athlete_id: Rider, kind: Kind, choice: TimeRangeChoice):
         """Keeps the range for this visit, or changes nothing if it's bad."""
-        athlete_id = rider(request)
-        if athlete_id is None:
-            return JSONResponse(NOT_LOGGED_IN, status_code=401)
-        if kind not in LIST_KINDS:
-            return JSONResponse(UNKNOWN_LIST, status_code=404)
         now = datetime.now(timezone.utc)
         # Setting a range is part of a visit, so the next look at the list mustn't reset it.
         with db.connect() as conn:
@@ -322,31 +327,21 @@ def api_router(db: Database, settings: Settings, worker_running: Callable[[], bo
         return {"time_range": ranges[kind]}
 
     @router.delete("/lists/{kind}/time-range")
-    def delete_time_range(request: Request, kind: str):
+    def delete_time_range(request: Request, _athlete_id: Rider, kind: Kind):
         """Back to all 48 hours for this list."""
-        if rider(request) is None:
-            return JSONResponse(NOT_LOGGED_IN, status_code=401)
-        if kind not in LIST_KINDS:
-            return JSONResponse(UNKNOWN_LIST, status_code=404)
         ranges = dict(request.session.get("time_ranges", {}))
         ranges.pop(kind, None)
         request.session["time_ranges"] = ranges
         return {"time_range": None}
 
     @router.post("/refresh")
-    def refresh(request: Request):
-        athlete_id = rider(request)
-        if athlete_id is None:
-            return JSONResponse(NOT_LOGGED_IN, status_code=401)
+    def refresh(athlete_id: Rider):
         with db.connect() as conn:
             enqueue_sync(conn, athlete_id)
         return {"ok": True}
 
     @router.put("/contributing")
-    def put_contributing(request: Request, choice: ContributingChoice):
-        athlete_id = rider(request)
-        if athlete_id is None:
-            return JSONResponse(NOT_LOGGED_IN, status_code=401)
+    def put_contributing(athlete_id: Rider, choice: ContributingChoice):
         with db.connect() as conn:
             conn.execute(
                 "UPDATE athletes SET contributes = %s WHERE id = %s", (choice.on, athlete_id)
@@ -354,10 +349,7 @@ def api_router(db: Database, settings: Settings, worker_running: Callable[[], bo
         return {"contributes": choice.on}
 
     @router.put("/profile")
-    def put_profile(request: Request, choice: ProfileChoice):
-        athlete_id = rider(request)
-        if athlete_id is None:
-            return JSONResponse(NOT_LOGGED_IN, status_code=401)
+    def put_profile(athlete_id: Rider, choice: ProfileChoice):
         try:
             weight = in_range(choice.weight_kg, WEIGHT_RANGE_KG)
             power = in_range(choice.power_20min_w, POWER_RANGE_W)

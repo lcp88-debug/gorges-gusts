@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from app.api import api_router
+from app.api import Refusal, api_router, refused
 from app.config import Settings, load_settings
 from app.db import Database, note_fastest_time_setting
 from app.maps import Maps
@@ -63,6 +63,7 @@ def create_app(
         SessionMiddleware, secret_key=settings.session_secret, same_site="lax"
     )
     app.state.worker = worker
+    app.add_exception_handler(Refusal, refused)
     app.include_router(api_router(db, settings, lambda: worker.running()))
 
     @app.get("/", response_class=HTMLResponse)
